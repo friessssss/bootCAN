@@ -13,7 +13,7 @@ interface DecodedSignal {
 }
 
 export function MessageViewer() {
-  const { traceMessages, monitorMessages, viewMode, idFilter, setIdFilter, isPaused, getDisplayMessages, setSelectedMessage, loadedDbcFiles } = useCanStore();
+  const { traceMessages, monitorMessages, viewMode, idFilter, setIdFilter, isPaused, getDisplayMessages, loadedDbcFiles } = useCanStore();
   
   // Get messages based on current view mode
   const entries = useMemo(() => getDisplayMessages(), [traceMessages, monitorMessages, viewMode]);
@@ -415,7 +415,7 @@ interface MessageRowProps {
   onSelect: () => void;
 }
 
-function MessageRow({ entry, rowIndex, showMonitorCols, isSelected, isExpanded, expandedSignals, onGetMessageName, onDecodeSignals, onSelect }: MessageRowProps) {
+function MessageRow({ entry, rowIndex, showMonitorCols, isSelected, isExpanded, expandedSignals, onGetMessageName, onDecodeSignals: _onDecodeSignals, onSelect }: MessageRowProps) {
   const { frame, count, cycleTime } = entry;
   const { setSelectedMessage, channels } = useCanStore();
   const [messageName, setMessageName] = useState<string | null>(null);

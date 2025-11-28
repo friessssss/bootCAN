@@ -17,11 +17,6 @@ export function ChannelManager() {
     channelBusStats,
   } = useCanStore();
 
-  const formatBitrate = (bitrate: number) => {
-    if (bitrate >= 1000000) return `${bitrate / 1000000}M`;
-    return `${bitrate / 1000}k`;
-  };
-
   const getChannelDbcFile = (channelId: string) => {
     const dbcEntry = Array.from(loadedDbcFiles.entries()).find(([id]) => id === channelId);
     return dbcEntry ? dbcEntry[1].split("/").pop() || dbcEntry[1] : null;
@@ -77,11 +72,7 @@ export function ChannelManager() {
           </div>
         ) : (
           channels.map((channel, index) => {
-            const interfaceName = channel.interfaceId 
-              ? availableInterfaces.find((i) => i.id === channel.interfaceId)?.name || channel.interfaceId
-              : "Not set";
             const dbcFile = getChannelDbcFile(channel.id) || channel.dbcFile?.split("/").pop() || null;
-            const bitrateStr = formatBitrate(channel.bitrate);
             
             return (
               <div

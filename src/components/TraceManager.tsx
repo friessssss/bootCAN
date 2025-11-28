@@ -12,7 +12,6 @@ export function TraceManager() {
   const {
     isLogging,
     logFilePath,
-    logFormat,
     playbackState,
     playbackSpeed,
     loadedTraceFile,

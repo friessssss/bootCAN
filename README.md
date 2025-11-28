@@ -95,9 +95,40 @@ pnpm lint
 
 ### Building for Release
 
+The project includes a build script to generate platform-specific releases:
+
 ```bash
-pnpm tauri build
+# Build for current platform (macOS on Mac, Windows on Windows)
+npm run build:release
+# or
+./build.sh
+
+# Build for macOS (generates .dmg)
+npm run build:macos
+# or
+./build.sh macos
+
+# Build for Windows (generates .exe/.msi)
+npm run build:windows
+# or
+./build.sh windows
+
+# Build for all platforms (macOS + Windows)
+npm run build:all
+# or
+./build.sh all
 ```
+
+Built releases will be placed in the `releases/` directory:
+- **macOS**: `.dmg` files for both Intel and Apple Silicon
+- **Windows**: `.exe` installer and `.msi` package
+
+**Note**: Cross-compiling Windows builds from macOS requires:
+```bash
+rustup target add x86_64-pc-windows-msvc
+```
+
+For best results, build Windows releases on a Windows machine or use CI/CD.
 
 ## Supported Hardware
 

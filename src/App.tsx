@@ -3,7 +3,6 @@ import { useCanStore } from "./stores/canStore";
 import { MessageViewer } from "./components/MessageViewer";
 import { TransmitPanel } from "./components/TransmitPanel";
 import { Toolbar } from "./components/Toolbar";
-import { TraceManager } from "./components/TraceManager";
 import { SignalInspector } from "./components/SignalInspector";
 import { ChannelManager } from "./components/ChannelManager";
 import { FilterPanel } from "./components/FilterPanel";

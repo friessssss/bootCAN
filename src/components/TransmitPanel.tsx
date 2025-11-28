@@ -125,7 +125,7 @@ export function TransmitPanel() {
         data: pendingTransmit.data || [0, 0, 0, 0, 0, 0, 0, 0],
         timestamp: 0,
         channel: channelId,
-        direction: "tx",
+        direction: "tx" as const,
       },
       intervalMs,
       enabled: false,

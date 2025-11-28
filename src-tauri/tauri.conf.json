@@ -31,7 +31,9 @@
   "bundle": {
     "active": true,
     "targets": "all",
-    "icon": ["icons/icon.svg"]
+    "icon": [
+      "icons/icon.png"
+    ]
   },
   "plugins": {}
 }
