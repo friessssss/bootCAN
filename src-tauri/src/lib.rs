@@ -68,6 +68,8 @@ pub fn run() {
             decode_message,
             get_message_info,
             set_advanced_filter,
+            save_project,
+            load_project,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

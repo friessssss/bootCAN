@@ -31,6 +31,11 @@ export interface BusStats {
   rxErrorCounter: number;
 }
 
+export interface ChannelBusStats {
+  channelId: string;
+  busLoad: number;
+}
+
 export interface InterfaceInfo {
   id: string;
   name: string;
@@ -102,8 +107,8 @@ interface CanState {
   loadedDbcFiles: Map<string, string>; // channel_id -> file_path
   selectedMessage: CanFrame | null; // Currently selected message for signal inspection
 
-  // Bus statistics
-  busStats: BusStats;
+  // Bus statistics (per channel)
+  channelBusStats: Map<string, BusStats>; // channel_id -> BusStats
 
   // Transmit state
   transmitJobs: TransmitJob[];
@@ -165,6 +170,10 @@ interface CanState {
   
   // Filter actions
   setFilters: (filters: Array<{ type: string; [key: string]: any }>) => void;
+  
+  // Project file actions
+  saveProject: (filePath: string) => Promise<void>;
+  loadProject: (filePath: string) => Promise<void>;
 }
 
 // Event listener cleanup
@@ -197,14 +206,7 @@ export const useCanStore = create<CanState>((set, get) => ({
   playbackCurrentIndex: 0,
   loadedDbcFiles: new Map<string, string>(),
   selectedMessage: null,
-  busStats: {
-    busLoad: 0,
-    txCount: 0,
-    rxCount: 0,
-    errorCount: 0,
-    txErrorCounter: 0,
-    rxErrorCounter: 0,
-  },
+  channelBusStats: new Map<string, BusStats>(),
   transmitJobs: [],
   pendingTransmit: {
     id: 0x100,
@@ -299,8 +301,20 @@ export const useCanStore = create<CanState>((set, get) => ({
       console.log("can-message listener set up");
 
       // Set up event listeners for bus statistics
-      unlistenStats = await listen<BusStats>("bus-stats", (event) => {
-        set({ busStats: event.payload });
+      unlistenStats = await listen<{ channelId: string; busLoad: number; txCount: number; rxCount: number; errorCount: number; txErrorCounter: number; rxErrorCounter: number }>("bus-stats", (event) => {
+        const stats = event.payload;
+        set((s) => {
+          const newStats = new Map(s.channelBusStats);
+          newStats.set(stats.channelId, {
+            busLoad: stats.busLoad,
+            txCount: stats.txCount,
+            rxCount: stats.rxCount,
+            errorCount: stats.errorCount,
+            txErrorCounter: stats.txErrorCounter,
+            rxErrorCounter: stats.rxErrorCounter,
+          });
+          return { channelBusStats: newStats };
+        });
       });
       
       console.log("Backend initialized successfully");
@@ -596,7 +610,14 @@ export const useCanStore = create<CanState>((set, get) => ({
       set((s) => {
         const newMap = new Map(s.loadedDbcFiles);
         newMap.set(channelId, filePath);
-        return { loadedDbcFiles: newMap };
+        // Also update the channel's dbcFile field for consistency
+        const updatedChannels = s.channels.map(ch =>
+          ch.id === channelId ? { ...ch, dbcFile: filePath } : ch
+        );
+        return { 
+          loadedDbcFiles: newMap,
+          channels: updatedChannels,
+        };
       });
     } catch (error) {
       console.error("Failed to load DBC:", error);
@@ -610,7 +631,14 @@ export const useCanStore = create<CanState>((set, get) => ({
       set((s) => {
         const newMap = new Map(s.loadedDbcFiles);
         newMap.delete(channelId);
-        return { loadedDbcFiles: newMap };
+        // Also clear the channel's dbcFile field
+        const updatedChannels = s.channels.map(ch =>
+          ch.id === channelId ? { ...ch, dbcFile: null } : ch
+        );
+        return { 
+          loadedDbcFiles: newMap,
+          channels: updatedChannels,
+        };
       });
     } catch (error) {
       console.error("Failed to remove DBC:", error);
@@ -718,6 +746,152 @@ export const useCanStore = create<CanState>((set, get) => ({
   
   // Filter actions
   setFilters: (filters) => set({ filters }),
+  
+  // Project file actions
+  saveProject: async (filePath: string) => {
+    const state = get();
+    
+    // Convert channels to project format
+    // Use loadedDbcFiles Map to get the actual DBC file path
+    const projectChannels = state.channels.map(ch => ({
+      id: ch.id,
+      name: ch.name,
+      interfaceId: ch.interfaceId,
+      bitrate: ch.bitrate,
+      dbcFile: state.loadedDbcFiles.get(ch.id) || ch.dbcFile || null,
+    }));
+    
+    // Convert filters to project format
+    const projectFilters = state.filters.map(f => ({ data: f }));
+    
+    // Convert transmit jobs to project format (exclude backendJobId)
+    const projectTransmitJobs = state.transmitJobs.map(job => ({
+      id: job.id,
+      frame: {
+        id: job.frame.id,
+        isExtended: job.frame.isExtended,
+        isRemote: job.frame.isRemote,
+        dlc: job.frame.dlc,
+        data: job.frame.data,
+        channel: job.frame.channel || undefined,
+      },
+      intervalMs: job.intervalMs,
+      enabled: false, // Always save as disabled
+    }));
+    
+    try {
+      await invoke("save_project", {
+        filePath,
+        channels: projectChannels,
+        filters: projectFilters,
+        transmitJobs: projectTransmitJobs,
+      });
+      console.log("Project saved successfully");
+    } catch (error) {
+      console.error("Failed to save project:", error);
+      throw error;
+    }
+  },
+  
+  loadProject: async (filePath: string) => {
+    try {
+      const project = await invoke<{
+        version: string;
+        channels: Array<{
+          id: string;
+          name: string;
+          interfaceId: string | null;
+          bitrate: number;
+          dbcFile: string | null;
+        }>;
+        filters: Array<{ data: any }>;
+        transmitJobs: Array<{
+          id: string;
+          frame: {
+            id: number;
+            isExtended: boolean;
+            isRemote: boolean;
+            dlc: number;
+            data: number[];
+            channel?: string;
+          };
+          intervalMs: number;
+          enabled: boolean;
+        }>;
+      }>("load_project", { filePath });
+      
+      // Restore channels
+      const restoredChannels = project.channels.map(ch => ({
+        id: ch.id,
+        name: ch.name,
+        interfaceId: ch.interfaceId,
+        bitrate: ch.bitrate,
+        dbcFile: ch.dbcFile,
+        connectionStatus: "disconnected" as ConnectionStatus,
+      }));
+      
+      // Restore filters
+      const restoredFilters = project.filters.map(f => f.data);
+      
+      // Restore transmit jobs (all disabled on load)
+      const restoredTransmitJobs = project.transmitJobs.map(job => ({
+        id: job.id,
+        frame: {
+          id: job.frame.id,
+          isExtended: job.frame.isExtended,
+          isRemote: job.frame.isRemote,
+          dlc: job.frame.dlc,
+          data: job.frame.data,
+          timestamp: 0,
+          channel: job.frame.channel || "",
+          direction: "tx" as const,
+        },
+        intervalMs: job.intervalMs,
+        enabled: false,
+        backendJobId: undefined,
+      }));
+      
+      // Restore loadedDbcFiles Map from restored channels
+      const restoredDbcFiles = new Map<string, string>();
+      for (const channel of restoredChannels) {
+        if (channel.dbcFile) {
+          restoredDbcFiles.set(channel.id, channel.dbcFile);
+        }
+      }
+      
+      // Update state first
+      set({
+        channels: restoredChannels,
+        filters: restoredFilters,
+        transmitJobs: restoredTransmitJobs,
+        activeChannel: restoredChannels.length > 0 ? restoredChannels[0].id : null,
+        loadedDbcFiles: restoredDbcFiles,
+      });
+      
+      // Load DBC files if they exist (this will also update the backend)
+      for (const channel of restoredChannels) {
+        if (channel.dbcFile) {
+          try {
+            await get().loadDbc(channel.id, channel.dbcFile);
+          } catch (error) {
+            console.warn(`Failed to load DBC file ${channel.dbcFile} for channel ${channel.id}:`, error);
+            // Remove from loadedDbcFiles if loading failed
+            set((s) => {
+              const newMap = new Map(s.loadedDbcFiles);
+              newMap.delete(channel.id);
+              return { loadedDbcFiles: newMap };
+            });
+            // Continue loading even if DBC fails
+          }
+        }
+      }
+      
+      console.log("Project loaded successfully");
+    } catch (error) {
+      console.error("Failed to load project:", error);
+      throw error;
+    }
+  },
 }));
 
 // Cleanup function for unmounting

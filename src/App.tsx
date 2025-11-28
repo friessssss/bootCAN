@@ -2,7 +2,6 @@ import { useEffect } from "react";
 import { useCanStore } from "./stores/canStore";
 import { MessageViewer } from "./components/MessageViewer";
 import { TransmitPanel } from "./components/TransmitPanel";
-import { BusStatus } from "./components/BusStatus";
 import { Toolbar } from "./components/Toolbar";
 import { TraceManager } from "./components/TraceManager";
 import { SignalInspector } from "./components/SignalInspector";
@@ -26,7 +25,6 @@ function App() {
         {/* Left Sidebar - Channels & Status */}
         <aside className="w-72 flex flex-col border-r border-can-border bg-can-bg-secondary overflow-y-auto">
           <ChannelManager />
-          <BusStatus />
           <FilterPanel />
         </aside>
 
@@ -51,7 +49,9 @@ function App() {
 }
 
 function StatusBar() {
-  const { connectionStatus, traceMessages, busStats } = useCanStore();
+  const { connectionStatus, traceMessages, activeChannel, channelBusStats } = useCanStore();
+  const busStats = activeChannel ? channelBusStats.get(activeChannel) : null;
+  const busLoad = busStats?.busLoad ?? 0;
 
   return (
     <footer className="h-6 px-4 flex items-center justify-between bg-can-bg-tertiary border-t border-can-border text-xs text-can-text-secondary">
@@ -85,10 +85,7 @@ function StatusBar() {
         <span>Messages: {traceMessages.length.toLocaleString()}</span>
       </div>
       <div className="flex items-center gap-4">
-        <span>Bus Load: {busStats.busLoad.toFixed(1)}%</span>
-        <span>TX: {busStats.txCount.toLocaleString()}</span>
-        <span>RX: {busStats.rxCount.toLocaleString()}</span>
-        <span>Errors: {busStats.errorCount}</span>
+        {activeChannel && <span>Bus Load: {busLoad.toFixed(1)}%</span>}
       </div>
     </footer>
   );

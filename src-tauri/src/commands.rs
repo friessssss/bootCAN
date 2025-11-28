@@ -12,6 +12,17 @@ use crate::AppState;
 use std::path::PathBuf;
 use tauri::{AppHandle, Emitter, State};
 use std::time::Duration;
+use serde::{Deserialize, Serialize};
+use std::fs;
+
+/// Bus statistics with channel ID for per-channel tracking
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChannelBusStats {
+    pub channel_id: String,
+    #[serde(flatten)]
+    pub stats: BusStats,
+}
 
 /// Get list of available CAN interfaces
 #[tauri::command]
@@ -53,7 +64,6 @@ pub async fn connect(
     // Start the receive loop
     let channel_clone = channel.clone();
     let app_clone = app.clone();
-    let interface_id_clone = interface_id.clone();
 
     // Spawn receive loop using spawn_blocking to avoid Send issues
     tokio::spawn(async move {
@@ -91,6 +101,58 @@ pub async fn connect(
             if let Err(e) = result {
                 log::error!("Error in receive loop: {:?}", e);
                 break;
+            }
+        }
+    });
+
+    // Start statistics update loop
+    let channel_stats = channel.clone();
+    let app_stats = app.clone();
+    let bitrate_for_stats = bitrate;
+    let channel_id_for_stats = interface_id.clone();
+    
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(Duration::from_millis(100));
+        let mut last_total_messages = 0u64;
+        let mut last_update_time = std::time::Instant::now();
+        
+        loop {
+            interval.tick().await;
+            
+            let result = {
+                let mut ch = channel_stats.write();
+                
+                if ch.state != ChannelState::Connected {
+                    None
+                } else {
+                    // Calculate message rate for bus load
+                    let now = std::time::Instant::now();
+                    let elapsed = now.duration_since(last_update_time).as_secs_f64();
+                    
+                    if elapsed > 0.0 {
+                        let total_messages = ch.stats.tx_count + ch.stats.rx_count;
+                        let message_delta = total_messages.saturating_sub(last_total_messages);
+                        let messages_per_second = message_delta as f64 / elapsed;
+                        
+                        // Update bus load
+                        ch.stats.update_bus_load(messages_per_second, bitrate_for_stats);
+                        
+                        last_total_messages = total_messages;
+                        last_update_time = now;
+                    }
+                    
+                    Some(ChannelBusStats {
+                        channel_id: channel_id_for_stats.clone(),
+                        stats: ch.stats.clone(),
+                    })
+                }
+            };
+            
+            match result {
+                Some(channel_stats) => {
+                    let _ = app_stats.emit("bus-stats", channel_stats);
+                }
+                None => break,
             }
         }
     });
@@ -204,26 +266,49 @@ pub async fn connect_channel(
     // Start statistics update loop
     let channel_stats = channel.clone();
     let app_stats = app.clone();
+    let bitrate_for_stats = bitrate;
+    let channel_id_for_stats = channel_id.clone();
     
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(Duration::from_millis(100));
+        let mut last_total_messages = 0u64;
+        let mut last_update_time = std::time::Instant::now();
         
         loop {
             interval.tick().await;
             
             let result = {
-                let ch = channel_stats.read();
+                let mut ch = channel_stats.write();
                 
                 if ch.state != ChannelState::Connected {
                     None
                 } else {
-                    Some(ch.stats.clone())
+                    // Calculate message rate for bus load
+                    let now = std::time::Instant::now();
+                    let elapsed = now.duration_since(last_update_time).as_secs_f64();
+                    
+                    if elapsed > 0.0 {
+                        let total_messages = ch.stats.tx_count + ch.stats.rx_count;
+                        let message_delta = total_messages.saturating_sub(last_total_messages);
+                        let messages_per_second = message_delta as f64 / elapsed;
+                        
+                        // Update bus load
+                        ch.stats.update_bus_load(messages_per_second, bitrate_for_stats);
+                        
+                        last_total_messages = total_messages;
+                        last_update_time = now;
+                    }
+                    
+                    Some(ChannelBusStats {
+                        channel_id: channel_id_for_stats.clone(),
+                        stats: ch.stats.clone(),
+                    })
                 }
             };
             
             match result {
-                Some(stats) => {
-                    let _ = app_stats.emit("bus-stats", stats);
+                Some(channel_stats) => {
+                    let _ = app_stats.emit("bus-stats", channel_stats);
                 }
                 None => break,
             }
@@ -818,4 +903,115 @@ pub async fn get_message_info(
     } else {
         Ok(None)
     }
+}
+
+/// Project file structures
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectChannel {
+    pub id: String,
+    pub name: String,
+    pub interface_id: Option<String>,
+    pub bitrate: u32,
+    pub dbc_file: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectFilter {
+    #[serde(flatten)]
+    pub data: serde_json::Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectTransmitJob {
+    pub id: String,
+    pub frame: FramePayload,
+    pub interval_ms: u64,
+    pub enabled: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectFile {
+    pub version: String,
+    pub channels: Vec<ProjectChannel>,
+    pub filters: Vec<ProjectFilter>,
+    pub transmit_jobs: Vec<ProjectTransmitJob>,
+}
+
+/// Save project to file
+#[tauri::command]
+pub async fn save_project(
+    file_path: String,
+    channels: Vec<ProjectChannel>,
+    filters: Vec<ProjectFilter>,
+    transmit_jobs: Vec<ProjectTransmitJob>,
+) -> Result<(), String> {
+    let project = ProjectFile {
+        version: "1.0".to_string(),
+        channels,
+        filters,
+        transmit_jobs,
+    };
+
+    let json = serde_json::to_string_pretty(&project)
+        .map_err(|e| format!("Failed to serialize project: {}", e))?;
+
+    fs::write(&file_path, json)
+        .map_err(|e| format!("Failed to write project file: {}", e))?;
+
+    log::info!("Project saved to {}", file_path);
+    Ok(())
+}
+
+/// Load project from file
+#[tauri::command]
+pub async fn load_project(
+    file_path: String,
+) -> Result<ProjectFile, String> {
+    let contents = fs::read_to_string(&file_path)
+        .map_err(|e| format!("Failed to read project file: {}", e))?;
+
+    let project: ProjectFile = serde_json::from_str(&contents)
+        .map_err(|e| format!("Failed to parse project file: {}", e))?;
+
+    // Validate and clean up project data
+    let available_interfaces = enumerate_interfaces();
+    let available_interface_ids: std::collections::HashSet<String> = available_interfaces
+        .iter()
+        .map(|i| i.id.clone())
+        .collect();
+
+    // Validate channels - set interface_id to None if interface doesn't exist
+    let validated_channels: Vec<ProjectChannel> = project.channels
+        .into_iter()
+        .map(|mut ch| {
+            if let Some(ref interface_id) = ch.interface_id {
+                if !available_interface_ids.contains(interface_id) {
+                    log::warn!("Interface {} not available, setting to None", interface_id);
+                    ch.interface_id = None;
+                }
+            }
+            // Validate DBC file exists
+            if let Some(ref dbc_path) = ch.dbc_file {
+                if !PathBuf::from(dbc_path).exists() {
+                    log::warn!("DBC file {} not found, setting to None", dbc_path);
+                    ch.dbc_file = None;
+                }
+            }
+            ch
+        })
+        .collect();
+
+    let validated_project = ProjectFile {
+        version: project.version,
+        channels: validated_channels,
+        filters: project.filters,
+        transmit_jobs: project.transmit_jobs,
+    };
+
+    log::info!("Project loaded from {}", file_path);
+    Ok(validated_project)
 }

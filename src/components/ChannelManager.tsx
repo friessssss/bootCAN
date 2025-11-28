@@ -5,8 +5,6 @@ import { open } from "@tauri-apps/plugin-dialog";
 export function ChannelManager() {
   const { 
     channels, 
-    activeChannel, 
-    setActiveChannel, 
     addChannel, 
     removeChannel,
     updateChannel,
@@ -16,6 +14,7 @@ export function ChannelManager() {
     loadedDbcFiles,
     loadDbc,
     removeDbc,
+    channelBusStats,
   } = useCanStore();
 
   const formatBitrate = (bitrate: number) => {
@@ -78,25 +77,16 @@ export function ChannelManager() {
           </div>
         ) : (
           channels.map((channel, index) => {
-            const isActive = activeChannel === channel.id;
             const interfaceName = channel.interfaceId 
               ? availableInterfaces.find((i) => i.id === channel.interfaceId)?.name || channel.interfaceId
               : "Not set";
             const dbcFile = getChannelDbcFile(channel.id) || channel.dbcFile?.split("/").pop() || null;
             const bitrateStr = formatBitrate(channel.bitrate);
             
-            // Format: "Channel 1, VirtualCAN 0, 500k, xxx.dbc"
-            const channelLabel = `Channel ${index + 1}, ${interfaceName}, ${bitrateStr}${dbcFile ? `, ${dbcFile}` : ""}`;
-            
             return (
               <div
                 key={channel.id}
-                className={`rounded px-2 py-1.5 cursor-pointer border ${
-                  isActive
-                    ? "bg-can-accent-blue text-white border-can-accent-blue"
-                    : "bg-can-bg-tertiary text-can-text-secondary hover:bg-can-bg-primary border-can-border"
-                }`}
-                onClick={() => setActiveChannel(channel.id)}
+                className="rounded px-2 py-1.5 border bg-can-bg-tertiary text-can-text-secondary border-can-border"
               >
                 <div className="flex items-center justify-between mb-1">
                   <input
@@ -107,9 +97,7 @@ export function ChannelManager() {
                       updateChannel(channel.id, { name: e.target.value });
                     }}
                     onClick={(e) => e.stopPropagation()}
-                    className={`text-xs font-medium bg-transparent border-none outline-none flex-1 ${
-                      isActive ? "text-white" : "text-can-text-secondary"
-                    }`}
+                    className="text-xs font-medium bg-transparent border-none outline-none flex-1 text-can-text-secondary"
                     placeholder={`Channel ${index + 1}`}
                   />
                   <button
@@ -126,9 +114,7 @@ export function ChannelManager() {
                   <div className="flex items-center justify-between">
                     <span className="opacity-75">Interface:</span>
                     <select
-                      className={`text-xxs px-1 py-0 rounded ${
-                        isActive ? "bg-white/20 text-white" : "bg-can-bg-primary text-can-text-primary"
-                      }`}
+                      className="text-xxs px-1 py-0 rounded bg-can-bg-primary text-can-text-primary"
                       value={channel.interfaceId || ""}
                       onClick={(e) => e.stopPropagation()}
                       onChange={(e) => {
@@ -136,20 +122,20 @@ export function ChannelManager() {
                         updateChannel(channel.id, { interfaceId: e.target.value || null });
                       }}
                     >
-                      <option value="">Select...</option>
-                      {availableInterfaces.map((iface) => (
-                        <option key={iface.id} value={iface.id}>
-                          {iface.name}
-                        </option>
-                      ))}
+                      <option value="">None</option>
+                      {availableInterfaces
+                        .filter((iface) => iface.available)
+                        .map((iface) => (
+                          <option key={iface.id} value={iface.id}>
+                            {iface.name}
+                          </option>
+                        ))}
                     </select>
                   </div>
                   <div className="flex items-center justify-between">
                     <span className="opacity-75">Bitrate:</span>
                     <select
-                      className={`text-xxs px-1 py-0 rounded ${
-                        isActive ? "bg-white/20 text-white" : "bg-can-bg-primary text-can-text-primary"
-                      }`}
+                      className="text-xxs px-1 py-0 rounded bg-can-bg-primary text-can-text-primary"
                       value={channel.bitrate}
                       onClick={(e) => e.stopPropagation()}
                       onChange={(e) => {
@@ -182,9 +168,7 @@ export function ChannelManager() {
                       <span className="opacity-75">DBC:</span>
                       <button
                         onClick={(e) => handleLoadDbc(channel.id, e)}
-                        className={`text-xxs px-1 py-0.5 rounded ${
-                          isActive ? "bg-white/20 text-white hover:bg-white/30" : "bg-can-bg-primary text-can-text-primary hover:bg-can-bg-tertiary"
-                        }`}
+                        className="text-xxs px-1 py-0.5 rounded bg-can-bg-primary text-can-text-primary hover:bg-can-bg-tertiary"
                         title="Load DBC/SYM file"
                       >
                         <FolderOpenIcon className="w-2.5 h-2.5 inline mr-0.5" />
@@ -223,6 +207,34 @@ export function ChannelManager() {
                       </button>
                     )}
                   </div>
+                  {channel.connectionStatus === "connected" && (() => {
+                    const stats = channelBusStats.get(channel.id);
+                    const busLoad = stats?.busLoad ?? 0;
+                    return (
+                      <div className="mt-1.5">
+                        <div className="flex items-center justify-between mb-0.5">
+                          <span className="text-xxs opacity-75">Bus Load:</span>
+                          <span className={`text-xxs font-mono ${
+                            busLoad > 80 ? "text-can-accent-red" :
+                            busLoad > 50 ? "text-can-accent-yellow" :
+                            "text-can-accent-green"
+                          }`}>
+                            {busLoad.toFixed(1)}%
+                          </span>
+                        </div>
+                        <div className="h-1 bg-can-bg-tertiary rounded-full overflow-hidden">
+                          <div
+                            className={`h-full transition-all duration-300 ${
+                              busLoad > 80 ? "bg-can-accent-red" :
+                              busLoad > 50 ? "bg-can-accent-yellow" :
+                              "bg-can-accent-green"
+                            }`}
+                            style={{ width: `${Math.min(busLoad, 100)}%` }}
+                          />
+                        </div>
+                      </div>
+                    );
+                  })()}
                 </div>
               </div>
             );

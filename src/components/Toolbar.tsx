@@ -1,4 +1,5 @@
 import { useCanStore } from "../stores/canStore";
+import { open, save } from "@tauri-apps/plugin-dialog";
 import {
   PlayIcon,
   PauseIcon,
@@ -9,7 +10,7 @@ import {
 } from "./icons";
 
 export function Toolbar() {
-  const { isPaused, togglePause, clearMessages, traceMessages, connectionStatus, viewMode, setViewMode, isRecording, toggleRecording } =
+  const { isPaused, togglePause, clearMessages, traceMessages, connectionStatus, viewMode, setViewMode, isRecording, toggleRecording, saveProject, loadProject } =
     useCanStore();
 
   const handleExport = () => {
@@ -37,6 +38,44 @@ export function Toolbar() {
     a.download = `can_trace_${new Date().toISOString().replace(/[:.]/g, "-")}.csv`;
     a.click();
     URL.revokeObjectURL(url);
+  };
+
+  const handleSaveProject = async () => {
+    try {
+      const filePath = await save({
+        title: "Save Project",
+        filters: [
+          { name: "bootCAN Project", extensions: ["bootcan", "json"] },
+          { name: "JSON Files", extensions: ["json"] },
+        ],
+        defaultPath: "project.bootcan",
+      });
+
+      if (filePath && typeof filePath === "string") {
+        await saveProject(filePath);
+      }
+    } catch (error) {
+      console.error("Failed to save project:", error);
+    }
+  };
+
+  const handleLoadProject = async () => {
+    try {
+      const filePath = await open({
+        title: "Load Project",
+        filters: [
+          { name: "bootCAN Project", extensions: ["bootcan", "json"] },
+          { name: "JSON Files", extensions: ["json"] },
+        ],
+        multiple: false,
+      });
+
+      if (filePath && typeof filePath === "string") {
+        await loadProject(filePath);
+      }
+    } catch (error) {
+      console.error("Failed to load project:", error);
+    }
   };
 
   return (
@@ -138,6 +177,24 @@ export function Toolbar() {
         >
           <ArrowDownTrayIcon className="w-4 h-4" />
           Export CSV
+        </button>
+
+        <div className="w-px h-6 bg-can-border mx-2" />
+
+        <button
+          onClick={handleSaveProject}
+          className="btn btn-secondary flex items-center gap-2"
+        >
+          <ArrowDownTrayIcon className="w-4 h-4" />
+          Save Project
+        </button>
+
+        <button
+          onClick={handleLoadProject}
+          className="btn btn-secondary flex items-center gap-2"
+        >
+          <ArrowDownTrayIcon className="w-4 h-4" />
+          Load Project
         </button>
       </div>
 
