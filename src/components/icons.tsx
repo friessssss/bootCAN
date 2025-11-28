@@ -224,3 +224,39 @@ export function StopIcon({ className }: IconProps) {
   );
 }
 
+export function FolderOpenIcon({ className }: IconProps) {
+  return (
+    <svg
+      className={className}
+      fill="none"
+      viewBox="0 0 24 24"
+      stroke="currentColor"
+      strokeWidth={2}
+    >
+      <path
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        d="M3.75 9.776c.112-.017.227-.026.344-.026h15.812c.117 0 .232.009.344.026m-16.5 0a2.25 2.25 0 0 0-.41 4.466 2.25 2.25 0 0 0 .98-3.668 2.25 2.25 0 0 0-.914-1.798m16.5 0a2.25 2.25 0 0 1 .41 4.466 2.25 2.25 0 0 1-.98 3.668 2.25 2.25 0 0 1-.914 1.798M3.75 9.776v8.25m0 0v-4.5m0 4.5h15.5m-15.5 0H3.375c-.621 0-1.125-.504-1.125-1.125v-1.5c0-.621.504-1.125 1.125-1.125h3.193a2.25 2.25 0 0 0 2.001-1.298l.812-1.581a2.25 2.25 0 0 1 2.001-1.298h7.856a2.25 2.25 0 0 1 2.001 1.298l.812 1.581a2.25 2.25 0 0 0 2.001 1.298H20.625c.621 0 1.125.504 1.125 1.125v1.5c0 .621-.504 1.125-1.125 1.125h-3.193a2.25 2.25 0 0 1-2.001-1.298l-.812-1.581a2.25 2.25 0 0 0-2.001-1.298H9.193a2.25 2.25 0 0 0-2.001 1.298l-.812 1.581A2.25 2.25 0 0 1 4.568 18H3.375c-.621 0-1.125-.504-1.125-1.125V9.776Z"
+      />
+    </svg>
+  );
+}
+
+export function PencilIcon({ className }: IconProps) {
+  return (
+    <svg
+      className={className}
+      fill="none"
+      viewBox="0 0 24 24"
+      strokeWidth={1.5}
+      stroke="currentColor"
+    >
+      <path
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        d="M16.862 4.487l1.687-1.688a1.875 1.875 0 112.652 2.652L10.582 16.07a4.5 4.5 0 01-1.897 1.13L6 18l.8-2.685a4.5 4.5 0 011.13-1.897l8.932-8.931zm0 0L19.5 7.125M18 14v4.75A2.25 2.25 0 0115.75 21H5.25A2.25 2.25 0 013 18.75V8.25A2.25 2.25 0 015.25 6H10"
+      />
+    </svg>
+  );
+}
+

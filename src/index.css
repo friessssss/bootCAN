@@ -127,7 +127,10 @@
   }
 
   .msg-table td {
-    @apply px-3 py-1.5 whitespace-nowrap;
+    @apply px-3 py-1.5;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 
   .msg-table tbody tr {

@@ -1,4 +1,5 @@
 use super::bus_stats::BusStats;
+use super::filter::FilterSet;
 use super::message::CanFrame;
 use crate::hal::traits::CanInterface;
 use crate::hal::virtual_can::VirtualCanInterface;
@@ -44,6 +45,7 @@ pub struct Channel {
     interface: Option<Box<dyn CanInterface>>,
     start_time: Option<Instant>,
     message_tx: broadcast::Sender<CanFrame>,
+    filter: FilterSet,
 }
 
 impl Channel {
@@ -58,6 +60,7 @@ impl Channel {
             interface: None,
             start_time: None,
             message_tx,
+            filter: FilterSet::default(),
         }
     }
 
@@ -172,8 +175,13 @@ impl Channel {
                     if let Some(start) = self.start_time {
                         frame.timestamp = start.elapsed().as_secs_f64();
                     }
-                    let _ = self.message_tx.send(frame.clone());
-                    Ok(Some(frame))
+                    // Apply filter
+                    if self.filter.matches(&frame) {
+                        let _ = self.message_tx.send(frame.clone());
+                        Ok(Some(frame))
+                    } else {
+                        Ok(None) // Filtered out
+                    }
                 }
                 Ok(None) => Ok(None),
                 Err(e) => {
@@ -191,6 +199,16 @@ impl Channel {
         self.start_time
             .map(|t| t.elapsed().as_secs_f64())
             .unwrap_or(0.0)
+    }
+
+    /// Set filter for this channel
+    pub fn set_filter(&mut self, filter: FilterSet) {
+        self.filter = filter;
+    }
+
+    /// Get current filter
+    pub fn get_filter(&self) -> &FilterSet {
+        &self.filter
     }
 }
 
@@ -225,6 +243,11 @@ impl ChannelManager {
             .cloned()
     }
 
+    /// Get the active channel ID
+    pub fn get_active_channel_id(&self) -> Option<&String> {
+        self.active_channel.as_ref()
+    }
+
     /// Set the active channel
     pub fn set_active_channel(&mut self, id: &str) {
         if self.channels.contains_key(id) {
@@ -243,6 +266,11 @@ impl ChannelManager {
         if self.active_channel.as_deref() == Some(id) {
             self.active_channel = None;
         }
+    }
+
+    /// Get a channel by ID
+    pub fn get_channel(&self, id: &str) -> Option<Arc<RwLock<Channel>>> {
+        self.channels.get(id).cloned()
     }
 }
 

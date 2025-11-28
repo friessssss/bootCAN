@@ -22,6 +22,21 @@ pub struct CanFrame {
     pub direction: String,
 }
 
+impl Default for CanFrame {
+    fn default() -> Self {
+        Self {
+            id: 0,
+            is_extended: false,
+            is_remote: false,
+            dlc: 0,
+            data: vec![],
+            timestamp: 0.0,
+            channel: String::new(),
+            direction: "rx".to_string(),
+        }
+    }
+}
+
 impl CanFrame {
     /// Create a new CAN frame
     pub fn new(id: u32, data: &[u8]) -> Self {
@@ -145,6 +160,8 @@ pub struct FramePayload {
     pub is_remote: bool,
     pub dlc: u8,
     pub data: Vec<u8>,
+    #[serde(default)]
+    pub channel: Option<String>,
 }
 
 impl From<&CanFrame> for FramePayload {
@@ -155,6 +172,11 @@ impl From<&CanFrame> for FramePayload {
             is_remote: frame.is_remote,
             dlc: frame.dlc,
             data: frame.data.clone(),
+            channel: if frame.channel.is_empty() {
+                None
+            } else {
+                Some(frame.channel.clone())
+            },
         }
     }
 }
@@ -168,7 +190,7 @@ impl From<FramePayload> for CanFrame {
             dlc: payload.dlc,
             data: payload.data,
             timestamp: 0.0,
-            channel: String::new(),
+            channel: payload.channel.unwrap_or_default(),
             direction: "tx".to_string(),
         }
     }

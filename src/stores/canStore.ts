@@ -58,6 +58,23 @@ interface CanState {
   selectedInterface: string | null;
   selectedBitrate: number;
   availableInterfaces: InterfaceInfo[];
+  
+  // Multi-channel state
+  channels: Array<{ 
+    id: string; 
+    name: string;
+    interfaceId: string | null;
+    bitrate: number;
+    dbcFile: string | null;
+    connectionStatus: ConnectionStatus;
+  }>;
+  activeChannel: string | null;
+  
+  // Filter state
+  filters: Array<{
+    type: string;
+    [key: string]: any;
+  }>;
 
   // Message buffers - trace collects all, monitor shows latest per ID with metadata
   traceMessages: CanFrame[];
@@ -68,6 +85,22 @@ interface CanState {
   // Recording state for trace
   isRecording: boolean;
   recordingStartTime: number | null;
+  
+  // Trace logging state
+  isLogging: boolean;
+  logFilePath: string | null;
+  logFormat: "csv" | "trc";
+  
+  // Trace playback state
+  playbackState: "stopped" | "playing" | "paused";
+  playbackSpeed: number;
+  loadedTraceFile: string | null;
+  playbackFrameCount: number;
+  playbackCurrentIndex: number;
+  
+  // DBC state
+  loadedDbcFiles: Map<string, string>; // channel_id -> file_path
+  selectedMessage: CanFrame | null; // Currently selected message for signal inspection
 
   // Bus statistics
   busStats: BusStats;
@@ -98,11 +131,40 @@ interface CanState {
   togglePause: () => void;
   setPendingTransmit: (frame: Partial<CanFrame>) => void;
   addTransmitJob: (job: Omit<TransmitJob, "id">) => void;
+  updateTransmitJob: (id: string, job: Omit<TransmitJob, "id">) => Promise<void>;
   removeTransmitJob: (id: string) => Promise<void>;
   toggleTransmitJob: (id: string) => Promise<void>;
   setIdFilter: (filter: string) => void;
   toggleRecording: () => void;
   stopRecording: () => void;
+  
+  // Trace logging actions
+  startLogging: (filePath: string, format: "csv" | "trc") => Promise<void>;
+  stopLogging: () => Promise<void>;
+  
+  // Trace playback actions
+  loadTrace: (filePath: string) => Promise<void>;
+  startPlayback: () => Promise<void>;
+  stopPlayback: () => Promise<void>;
+  pausePlayback: () => Promise<void>;
+  resumePlayback: () => Promise<void>;
+  setPlaybackSpeed: (speed: number) => Promise<void>;
+  
+  // DBC actions
+  loadDbc: (channelId: string, filePath: string) => Promise<void>;
+  removeDbc: (channelId: string) => Promise<void>;
+  setSelectedMessage: (message: CanFrame | null) => void;
+  
+  // Multi-channel actions
+  addChannel: () => void;
+  removeChannel: (id: string) => void;
+  setActiveChannel: (id: string) => void;
+  updateChannel: (id: string, updates: Partial<{ name: string; interfaceId: string | null; bitrate: number; dbcFile: string | null }>) => void;
+  connectChannel: (id: string) => Promise<void>;
+  disconnectChannel: (id: string) => Promise<void>;
+  
+  // Filter actions
+  setFilters: (filters: Array<{ type: string; [key: string]: any }>) => void;
 }
 
 // Event listener cleanup
@@ -116,12 +178,25 @@ export const useCanStore = create<CanState>((set, get) => ({
   selectedInterface: null,
   selectedBitrate: 500000,
   availableInterfaces: [],
+  channels: [],
+  activeChannel: null,
+  filters: [],
   traceMessages: [],
   monitorMessages: new Map<string, MonitorEntry>(),
   maxMessages: 10000,
   isPaused: false,
   isRecording: false,
   recordingStartTime: null,
+  isLogging: false,
+  logFilePath: null,
+  logFormat: "csv",
+  playbackState: "stopped",
+  playbackSpeed: 1.0,
+  loadedTraceFile: null,
+  playbackFrameCount: 0,
+  playbackCurrentIndex: 0,
+  loadedDbcFiles: new Map<string, string>(),
+  selectedMessage: null,
   busStats: {
     busLoad: 0,
     txCount: 0,
@@ -174,7 +249,8 @@ export const useCanStore = create<CanState>((set, get) => ({
         if (state.isPaused) return;
 
         const newFrame = event.payload;
-        const monitorKey = `${newFrame.id}-${newFrame.direction}`;
+        // Include channel in key so same ID on different channels are separate
+        const monitorKey = `${newFrame.channel}-${newFrame.id}-${newFrame.direction}`;
         
         // Always update both buffers
         set((s) => {
@@ -268,11 +344,23 @@ export const useCanStore = create<CanState>((set, get) => ({
 
   // Send a CAN message
   sendMessage: async (frame: Partial<CanFrame>) => {
-    const { connectionStatus } = get();
-    console.log("sendMessage called, status:", connectionStatus, "frame:", frame);
-    if (connectionStatus !== "connected") {
-      console.log("Not connected, skipping send");
+    const { channels } = get();
+    // Check if the specified channel (or any channel) is connected
+    const channelId = frame.channel;
+    const channel = channelId ? channels.find(c => c.id === channelId) : null;
+    
+    if (channelId && channel && channel.connectionStatus !== "connected") {
+      console.log("Channel not connected, skipping send");
       return;
+    }
+    
+    // If no channel specified, check if any channel is connected
+    if (!channelId) {
+      const hasConnected = channels.some(c => c.connectionStatus === "connected");
+      if (!hasConnected) {
+        console.log("No connected channels, skipping send");
+        return;
+      }
     }
 
     try {
@@ -317,6 +405,27 @@ export const useCanStore = create<CanState>((set, get) => ({
     }));
   },
 
+  updateTransmitJob: async (id: string, job: Omit<TransmitJob, "id">) => {
+    const existingJob = get().transmitJobs.find((j) => j.id === id);
+    if (!existingJob) return;
+
+    // If the job is currently enabled, stop it first
+    if (existingJob.enabled && existingJob.backendJobId) {
+      try {
+        await invoke("stop_periodic_transmit", { jobId: existingJob.backendJobId });
+      } catch (e) {
+        console.error("Failed to stop periodic transmit for update:", e);
+      }
+    }
+
+    // Update the job
+    set((s) => ({
+      transmitJobs: s.transmitJobs.map((j) =>
+        j.id === id ? { ...job, id, enabled: false, backendJobId: undefined } : j
+      ),
+    }));
+  },
+
   removeTransmitJob: async (id: string) => {
     // Stop the job on backend if running
     const job = get().transmitJobs.find((j) => j.id === id);
@@ -347,6 +456,7 @@ export const useCanStore = create<CanState>((set, get) => ({
           isRemote: job.frame.isRemote,
           dlc: job.frame.dlc,
           data: job.frame.data,
+          channel: job.frame.channel || undefined,
         };
         // Backend returns the actual job ID we need to use for stopping
         const backendJobId = await invoke<string>("start_periodic_transmit", { 
@@ -396,6 +506,218 @@ export const useCanStore = create<CanState>((set, get) => ({
   },
   
   stopRecording: () => set({ isRecording: false, recordingStartTime: null }),
+  
+  // Trace logging actions
+  startLogging: async (filePath: string, format: "csv" | "trc") => {
+    try {
+      await invoke("start_logging", { filePath, format });
+      set({ isLogging: true, logFilePath: filePath, logFormat: format });
+    } catch (error) {
+      console.error("Failed to start logging:", error);
+      throw error;
+    }
+  },
+  
+  stopLogging: async () => {
+    try {
+      await invoke("stop_logging");
+      set({ isLogging: false, logFilePath: null });
+    } catch (error) {
+      console.error("Failed to stop logging:", error);
+      throw error;
+    }
+  },
+  
+  // Trace playback actions
+  loadTrace: async (filePath: string) => {
+    try {
+      const count = await invoke<number>("load_trace", { filePath });
+      set({ loadedTraceFile: filePath, playbackFrameCount: count, playbackCurrentIndex: 0 });
+    } catch (error) {
+      console.error("Failed to load trace:", error);
+      throw error;
+    }
+  },
+  
+  startPlayback: async () => {
+    try {
+      await invoke("start_playback");
+      set({ playbackState: "playing" });
+    } catch (error) {
+      console.error("Failed to start playback:", error);
+      throw error;
+    }
+  },
+  
+  stopPlayback: async () => {
+    try {
+      await invoke("stop_playback");
+      set({ playbackState: "stopped", playbackCurrentIndex: 0 });
+    } catch (error) {
+      console.error("Failed to stop playback:", error);
+      throw error;
+    }
+  },
+  
+  pausePlayback: async () => {
+    try {
+      await invoke("pause_playback");
+      set({ playbackState: "paused" });
+    } catch (error) {
+      console.error("Failed to pause playback:", error);
+      throw error;
+    }
+  },
+  
+  resumePlayback: async () => {
+    try {
+      await invoke("resume_playback");
+      set({ playbackState: "playing" });
+    } catch (error) {
+      console.error("Failed to resume playback:", error);
+      throw error;
+    }
+  },
+  
+  setPlaybackSpeed: async (speed: number) => {
+    try {
+      await invoke("set_playback_speed", { speed });
+      set({ playbackSpeed: speed });
+    } catch (error) {
+      console.error("Failed to set playback speed:", error);
+      throw error;
+    }
+  },
+  
+  // DBC actions
+  loadDbc: async (channelId: string, filePath: string) => {
+    try {
+      await invoke("load_dbc", { channelId, filePath });
+      set((s) => {
+        const newMap = new Map(s.loadedDbcFiles);
+        newMap.set(channelId, filePath);
+        return { loadedDbcFiles: newMap };
+      });
+    } catch (error) {
+      console.error("Failed to load DBC:", error);
+      throw error;
+    }
+  },
+  
+  removeDbc: async (channelId: string) => {
+    try {
+      // Note: Backend doesn't have remove_dbc command yet, but we can clear from frontend
+      set((s) => {
+        const newMap = new Map(s.loadedDbcFiles);
+        newMap.delete(channelId);
+        return { loadedDbcFiles: newMap };
+      });
+    } catch (error) {
+      console.error("Failed to remove DBC:", error);
+      throw error;
+    }
+  },
+  
+  setSelectedMessage: (message) => set({ selectedMessage: message }),
+  
+  // Multi-channel actions
+  addChannel: () => {
+    const id = `channel_${Date.now()}`;
+    const name = `Channel ${get().channels.length + 1}`;
+    set((s) => ({
+      channels: [...s.channels, { 
+        id, 
+        name,
+        interfaceId: null,
+        bitrate: 500000,
+        dbcFile: null,
+        connectionStatus: "disconnected",
+      }],
+      activeChannel: s.activeChannel || id,
+    }));
+  },
+  
+  removeChannel: async (id: string) => {
+    const channel = get().channels.find((c) => c.id === id);
+    if (channel && channel.connectionStatus === "connected") {
+      await get().disconnectChannel(id);
+    }
+    set((s) => {
+      const newChannels = s.channels.filter((c) => c.id !== id);
+      const newActiveChannel =
+        s.activeChannel === id
+          ? newChannels.length > 0
+            ? newChannels[0].id
+            : null
+          : s.activeChannel;
+      return {
+        channels: newChannels,
+        activeChannel: newActiveChannel,
+      };
+    });
+  },
+  
+  setActiveChannel: (id) => set({ activeChannel: id }),
+  
+  updateChannel: (id: string, updates) => {
+    set((s) => ({
+      channels: s.channels.map((c) =>
+        c.id === id ? { ...c, ...updates } : c
+      ),
+    }));
+  },
+  
+  connectChannel: async (id: string) => {
+    const channel = get().channels.find((c) => c.id === id);
+    if (!channel || !channel.interfaceId) return;
+    
+    set((s) => ({
+      channels: s.channels.map((c) =>
+        c.id === id ? { ...c, connectionStatus: "connecting" } : c
+      ),
+    }));
+    
+    try {
+      await invoke("connect_channel", {
+        channelId: id,
+        interfaceId: channel.interfaceId,
+        bitrate: channel.bitrate,
+      });
+      set((s) => ({
+        channels: s.channels.map((c) =>
+          c.id === id ? { ...c, connectionStatus: "connected" } : c
+        ),
+      }));
+    } catch (error) {
+      console.error("Failed to connect channel:", error);
+      set((s) => ({
+        channels: s.channels.map((c) =>
+          c.id === id ? { ...c, connectionStatus: "error" } : c
+        ),
+      }));
+    }
+  },
+  
+  disconnectChannel: async (id: string) => {
+    try {
+      await invoke("disconnect_channel", { channelId: id });
+      set((s) => ({
+        channels: s.channels.map((c) =>
+          c.id === id ? { ...c, connectionStatus: "disconnected" } : c
+        ),
+      }));
+    } catch (error) {
+      console.error("Failed to disconnect channel:", error);
+      set((s) => ({
+        channels: s.channels.map((c) =>
+          c.id === id ? { ...c, connectionStatus: "error" } : c
+        ),
+      }));
+    }
+  },
+  
+  // Filter actions
+  setFilters: (filters) => set({ filters }),
 }));
 
 // Cleanup function for unmounting

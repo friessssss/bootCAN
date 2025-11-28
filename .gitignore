@@ -35,3 +35,14 @@ coverage/
 *.tmp
 *.temp
 
+# Symbol Files
+*.sym
+*.dbc
+*.dbc.gz
+*.dbc.bz2
+*.dbc.xz
+*.dbc.tar
+*.dbc.tar.gz
+*.dbc.tar.bz2
+*.dbc.tar.xz
+

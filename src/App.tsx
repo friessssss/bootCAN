@@ -1,10 +1,13 @@
 import { useEffect } from "react";
 import { useCanStore } from "./stores/canStore";
-import { ConnectionPanel } from "./components/ConnectionPanel";
 import { MessageViewer } from "./components/MessageViewer";
 import { TransmitPanel } from "./components/TransmitPanel";
 import { BusStatus } from "./components/BusStatus";
 import { Toolbar } from "./components/Toolbar";
+import { TraceManager } from "./components/TraceManager";
+import { SignalInspector } from "./components/SignalInspector";
+import { ChannelManager } from "./components/ChannelManager";
+import { FilterPanel } from "./components/FilterPanel";
 
 function App() {
   const { initializeBackend } = useCanStore();
@@ -20,10 +23,11 @@ function App() {
 
       {/* Main Content Area */}
       <div className="flex-1 flex overflow-hidden">
-        {/* Left Sidebar - Connection & Status */}
-        <aside className="w-72 flex flex-col border-r border-can-border bg-can-bg-secondary">
-          <ConnectionPanel />
+        {/* Left Sidebar - Channels & Status */}
+        <aside className="w-72 flex flex-col border-r border-can-border bg-can-bg-secondary overflow-y-auto">
+          <ChannelManager />
           <BusStatus />
+          <FilterPanel />
         </aside>
 
         {/* Center - Message Viewer */}
@@ -31,9 +35,12 @@ function App() {
           <MessageViewer />
         </main>
 
-        {/* Right Sidebar - Transmit Panel */}
-        <aside className="w-80 border-l border-can-border bg-can-bg-secondary">
+        {/* Right Sidebar - Transmit Panel & Signal Inspector */}
+        <aside className="w-80 border-l border-can-border bg-can-bg-secondary flex flex-col overflow-hidden">
           <TransmitPanel />
+          <div className="border-t border-can-border overflow-y-auto">
+            <SignalInspector />
+          </div>
         </aside>
       </div>
 
