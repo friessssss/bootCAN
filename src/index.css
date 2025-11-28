@@ -1,0 +1,178 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  * {
+    @apply border-can-border;
+  }
+
+  body {
+    @apply overflow-hidden select-none;
+  }
+
+  /* Custom scrollbar for dark theme */
+  ::-webkit-scrollbar {
+    @apply w-2 h-2;
+  }
+
+  ::-webkit-scrollbar-track {
+    @apply bg-can-bg-secondary;
+  }
+
+  ::-webkit-scrollbar-thumb {
+    @apply bg-can-border rounded-full;
+  }
+
+  ::-webkit-scrollbar-thumb:hover {
+    @apply bg-can-text-muted;
+  }
+
+  /* Prevent text selection in UI elements */
+  button,
+  input,
+  select {
+    @apply select-none;
+  }
+
+  /* Allow text selection in data displays */
+  .selectable {
+    @apply select-text;
+  }
+}
+
+@layer components {
+  .panel {
+    @apply bg-can-bg-secondary border border-can-border rounded-lg;
+  }
+
+  .panel-header {
+    @apply px-4 py-2 border-b border-can-border flex items-center justify-between;
+  }
+
+  .panel-title {
+    @apply text-sm font-semibold text-can-text-primary;
+  }
+
+  .btn {
+    @apply px-3 py-1.5 text-sm font-medium rounded-md transition-colors duration-150;
+    @apply focus:outline-none focus:ring-2 focus:ring-can-accent-blue focus:ring-offset-1 focus:ring-offset-can-bg-primary;
+  }
+
+  .btn-primary {
+    @apply bg-can-accent-blue text-white hover:bg-can-accent-blue/90;
+  }
+
+  .btn-secondary {
+    @apply bg-can-bg-tertiary text-can-text-primary hover:bg-can-bg-hover;
+  }
+
+  .btn-danger {
+    @apply bg-can-accent-red text-white hover:bg-can-accent-red/90;
+  }
+
+  .btn-success {
+    @apply bg-can-accent-green text-white hover:bg-can-accent-green/90;
+  }
+
+  .input {
+    @apply bg-can-bg-tertiary border border-can-border rounded-md px-3 py-1.5;
+    @apply text-sm text-can-text-primary placeholder-can-text-muted;
+    @apply focus:outline-none focus:ring-2 focus:ring-can-accent-blue focus:border-transparent;
+  }
+
+  .select {
+    @apply bg-can-bg-tertiary border border-can-border rounded-md px-3 py-1.5;
+    @apply text-sm text-can-text-primary;
+    @apply focus:outline-none focus:ring-2 focus:ring-can-accent-blue focus:border-transparent;
+    @apply cursor-pointer;
+  }
+
+  .label {
+    @apply text-xs font-medium text-can-text-secondary uppercase tracking-wide;
+  }
+
+  .badge {
+    @apply inline-flex items-center px-2 py-0.5 rounded text-xs font-medium;
+  }
+
+  .badge-green {
+    @apply bg-can-accent-green/20 text-can-accent-green;
+  }
+
+  .badge-red {
+    @apply bg-can-accent-red/20 text-can-accent-red;
+  }
+
+  .badge-yellow {
+    @apply bg-can-accent-yellow/20 text-can-accent-yellow;
+  }
+
+  .badge-blue {
+    @apply bg-can-accent-blue/20 text-can-accent-blue;
+  }
+
+  /* Message viewer table styles */
+  .msg-table {
+    @apply w-full text-sm font-mono border-collapse;
+  }
+
+  .msg-table thead {
+    @apply sticky top-0 z-10;
+  }
+
+  .msg-table th {
+    @apply px-3 py-2 text-left text-xs font-semibold text-can-text-secondary uppercase tracking-wider;
+    @apply bg-can-bg-tertiary;
+  }
+
+  .msg-table td {
+    @apply px-3 py-1.5 whitespace-nowrap;
+  }
+
+  .msg-table tbody tr {
+    @apply border-b border-can-border-muted;
+  }
+
+  .msg-table tbody tr:hover {
+    @apply bg-can-bg-hover;
+  }
+
+  /* Hex data display */
+  .hex-byte {
+    @apply inline-block w-6 text-center;
+  }
+
+  .hex-byte-changed {
+    @apply text-can-accent-yellow;
+  }
+}
+
+@layer utilities {
+  .text-balance {
+    text-wrap: balance;
+  }
+
+  /* Status indicator animations */
+  .status-connected {
+    @apply relative;
+  }
+
+  .status-connected::before {
+    content: "";
+    @apply absolute -left-2 top-1/2 -translate-y-1/2 w-2 h-2 rounded-full bg-can-accent-green;
+    animation: pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+  }
+
+  .status-disconnected::before {
+    content: "";
+    @apply absolute -left-2 top-1/2 -translate-y-1/2 w-2 h-2 rounded-full bg-can-text-muted;
+  }
+
+  .status-error::before {
+    content: "";
+    @apply absolute -left-2 top-1/2 -translate-y-1/2 w-2 h-2 rounded-full bg-can-accent-red;
+    animation: pulse 1s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+  }
+}
+
