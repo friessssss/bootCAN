@@ -30,6 +30,14 @@ if [ ! -f "package.json" ] || [ ! -d "src-tauri" ]; then
     exit 1
 fi
 
+# Extract version from package.json
+VERSION=$(grep -o '"version": "[^"]*"' package.json | cut -d'"' -f4)
+if [ -z "$VERSION" ]; then
+    print_error "Failed to extract version from package.json"
+    exit 1
+fi
+print_info "Building version: $VERSION"
+
 # Create releases directory
 RELEASES_DIR="releases"
 mkdir -p "$RELEASES_DIR"
@@ -60,7 +68,7 @@ build_macos() {
     create_dmg_manually() {
         local arch=$1
         local app_path="src-tauri/target/${arch}/release/bundle/macos/bootCAN.app"
-        local dmg_name="bootCAN_0.1.0_${arch}.dmg"
+        local dmg_name="bootCAN_${VERSION}_${arch}.dmg"
         local dmg_path="$RELEASES_DIR/$dmg_name"
         
         if [ -d "$app_path" ]; then
@@ -78,7 +86,7 @@ build_macos() {
                 return 0
             else
                 print_warn "Failed to create DMG manually, copying .app bundle instead"
-                cp -R "$app_path" "$RELEASES_DIR/bootCAN_0.1.0_${arch}.app" 2>/dev/null || true
+                cp -R "$app_path" "$RELEASES_DIR/bootCAN_${VERSION}_${arch}.app" 2>/dev/null || true
                 rm -rf "$temp_dir"
                 return 1
             fi
@@ -93,8 +101,11 @@ build_macos() {
         local target_dir="src-tauri/target/${arch}/release/bundle"
         
         # Check in dmg directory first (final location)
-        local dmg_final="${target_dir}/dmg/bootCAN_0.1.0_${arch_name}.dmg"
-        local dmg_x64="${target_dir}/dmg/bootCAN_0.1.0_x64.dmg"
+        local dmg_final="${target_dir}/dmg/bootCAN_${VERSION}_${arch_name}.dmg"
+        local dmg_x64="${target_dir}/dmg/bootCAN_${VERSION}_x64.dmg"
+        
+        # Also check for any DMG file with the version pattern (Tauri might generate slightly different names)
+        local dmg_pattern="${target_dir}/dmg/bootCAN_*.dmg"
         
         # Check in macos directory (temporary location if DMG script failed)
         local dmg_temp=$(find "${target_dir}/macos" -name "*.dmg" -type f 2>/dev/null | head -1)
@@ -102,9 +113,11 @@ build_macos() {
         if [ -f "$dmg_final" ]; then
             cp "$dmg_final" "$RELEASES_DIR/" 2>/dev/null && print_info "Copied ${arch_name} DMG from dmg directory" && return 0
         elif [ -f "$dmg_x64" ] && [ "$arch_name" = "x86_64" ]; then
-            cp "$dmg_x64" "$RELEASES_DIR/bootCAN_0.1.0_${arch_name}.dmg" 2>/dev/null && print_info "Copied ${arch_name} DMG (renamed from x64)" && return 0
+            cp "$dmg_x64" "$RELEASES_DIR/bootCAN_${VERSION}_${arch_name}.dmg" 2>/dev/null && print_info "Copied ${arch_name} DMG (renamed from x64)" && return 0
         elif [ -n "$dmg_temp" ] && [ -f "$dmg_temp" ]; then
-            cp "$dmg_temp" "$RELEASES_DIR/bootCAN_0.1.0_${arch_name}.dmg" 2>/dev/null && print_info "Copied ${arch_name} DMG from temporary location" && return 0
+            # Extract the actual DMG name from Tauri output and rename to our format
+            local dmg_basename=$(basename "$dmg_temp")
+            cp "$dmg_temp" "$RELEASES_DIR/bootCAN_${VERSION}_${arch_name}.dmg" 2>/dev/null && print_info "Copied ${arch_name} DMG from temporary location" && return 0
         fi
         
         return 1
@@ -148,12 +161,16 @@ build_windows() {
     # Copy Windows installer/exe to releases directory
     print_info "Copying Windows releases..."
     
-    if [ -f "src-tauri/target/x86_64-pc-windows-msvc/release/bundle/msi/bootCAN_0.1.0_x64_en-US.msi" ]; then
+    # Copy MSI installer (Tauri generates with version in filename)
+    if [ -d "src-tauri/target/x86_64-pc-windows-msvc/release/bundle/msi" ]; then
         cp "src-tauri/target/x86_64-pc-windows-msvc/release/bundle/msi/"*.msi "$RELEASES_DIR/" 2>/dev/null || true
+        print_info "Copied MSI installer(s)"
     fi
     
-    if [ -f "src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/bootCAN_0.1.0_x64-setup.exe" ]; then
+    # Copy NSIS installer (Tauri generates with version in filename)
+    if [ -d "src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis" ]; then
         cp "src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/"*.exe "$RELEASES_DIR/" 2>/dev/null || true
+        print_info "Copied NSIS installer(s)"
     fi
     
     # Also copy the standalone .exe if available
