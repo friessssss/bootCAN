@@ -16,7 +16,32 @@ export function MessageViewer() {
   const { traceMessages, monitorMessages, viewMode, idFilter, setIdFilter, isPaused, getDisplayMessages, loadedDbcFiles } = useCanStore();
   
   // Get messages based on current view mode
-  const entries = useMemo(() => getDisplayMessages(), [traceMessages, monitorMessages, viewMode]);
+  // Optimize: only recalculate when relevant data changes based on view mode
+  const entries = useMemo(() => {
+    if (viewMode === "monitor") {
+      // Monitor mode: only use monitorMessages, ignore traceMessages completely
+      return Array.from(monitorMessages.values()).sort((a, b) => a.frame.id - b.frame.id);
+    } else {
+      // Trace mode: use traceMessages, but limit to prevent performance issues
+      const maxMessages = 10000; // Use same limit as maxMessages in store
+      const messagesToShow = traceMessages.length > maxMessages
+        ? traceMessages.slice(-maxMessages)
+        : traceMessages;
+      
+      return messagesToShow.map(frame => ({
+        frame,
+        count: 0,
+        cycleTime: 0,
+        lastTimestamp: frame.timestamp,
+      }));
+    }
+  }, [
+    // Only depend on monitorMessages in monitor mode
+    viewMode === "monitor" ? monitorMessages : null,
+    // Only depend on traceMessages.length in trace mode (not the full array)
+    viewMode === "trace" ? traceMessages.length : 0,
+    viewMode
+  ]);
   const tableContainerRef = useRef<HTMLDivElement>(null);
   const [autoScroll, setAutoScroll] = useState(true);
   

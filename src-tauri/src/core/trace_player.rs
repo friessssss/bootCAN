@@ -35,7 +35,7 @@ impl TracePlayer {
     }
 
     /// Load trace file (CSV or TRC format)
-    pub async fn load_file(&mut self, path: PathBuf) -> Result<usize, String> {
+    pub async fn load_file(&mut self, path: PathBuf, bus_to_channel: Option<std::collections::HashMap<u8, String>>) -> Result<usize, String> {
         let file = File::open(&path)
             .await
             .map_err(|e| format!("Failed to open trace file: {}", e))?;
@@ -56,16 +56,40 @@ impl TracePlayer {
 
         let mut frames = VecDeque::new();
         let mut line_num = 0;
+        let mut start_time_days: Option<f64> = None;
 
-        // Skip header lines
+        // Parse header and data lines
         while let Some(line) = lines.next_line().await.map_err(|e| {
             format!("Failed to read trace file at line {}: {}", line_num, e)
         })? {
             line_num += 1;
 
-            // Skip header lines
-            if line.starts_with('$') || line.starts_with("Time") {
-                continue;
+            // Parse TRC header lines
+            if format == TraceFormat::Trc {
+                if line.starts_with(";$STARTTIME=") {
+                    let value = line.trim_start_matches(";$STARTTIME=").trim();
+                    start_time_days = value.parse::<f64>().ok();
+                    continue;
+                }
+                if line.starts_with('$') || line.starts_with(';') {
+                    continue;
+                }
+                if line.trim().is_empty() {
+                    continue;
+                }
+                // Skip column header line
+                if line.contains("Message") && line.contains("Time") {
+                    continue;
+                }
+                // Skip separator line
+                if line.starts_with("---+---") {
+                    continue;
+                }
+            } else {
+                // CSV format - skip header
+                if line.starts_with("Time") || line.starts_with("time") {
+                    continue;
+                }
             }
 
             if line.trim().is_empty() {
@@ -80,7 +104,7 @@ impl TracePlayer {
                     }
                 }
                 TraceFormat::Trc => {
-                    if let Ok(frame) = Self::parse_trc_line(&line) {
+                    if let Ok(mut frame) = Self::parse_trc_line(&line, start_time_days, &bus_to_channel) {
                         frames.push_back(frame);
                     }
                 }
@@ -108,6 +132,7 @@ impl TracePlayer {
         self.start_time = Some(tokio::time::Instant::now());
         if let Some(frame) = self.frames.get(self.current_index) {
             self.playback_start_timestamp = frame.timestamp;
+            log::info!("Starting playback: {} frames, first timestamp: {}", self.frames.len(), frame.timestamp);
         }
 
         Ok(())
@@ -162,6 +187,7 @@ impl TracePlayer {
 
         if self.current_index >= self.frames.len() {
             self.state = PlaybackState::Stopped;
+            log::info!("Playback finished: reached end of trace");
             return None;
         }
 
@@ -169,10 +195,17 @@ impl TracePlayer {
         let current_timestamp = current_frame.timestamp;
 
         // Calculate delay until next frame
+        // Use relative time from playback start for delay calculation
         let delay = if self.current_index + 1 < self.frames.len() {
             let next_timestamp = self.frames[self.current_index + 1].timestamp;
             let delta = (next_timestamp - current_timestamp) / self.playback_speed;
-            tokio::time::Duration::from_secs_f64(delta.max(0.0))
+            let delay_duration = tokio::time::Duration::from_secs_f64(delta.max(0.0));
+            // Cap delay at 1 second to prevent very long waits
+            if delay_duration.as_secs_f64() > 1.0 {
+                tokio::time::Duration::from_secs(1)
+            } else {
+                delay_duration
+            }
         } else {
             // Last frame
             tokio::time::Duration::from_secs(0)
@@ -196,6 +229,11 @@ impl TracePlayer {
     /// Get total frame count
     pub fn get_frame_count(&self) -> usize {
         self.frames.len()
+    }
+
+    /// Get all loaded frames (for immediate decoding)
+    pub fn get_all_frames(&self) -> Vec<CanFrame> {
+        self.frames.iter().cloned().collect()
     }
 
     /// Parse CSV line
@@ -242,38 +280,87 @@ impl TracePlayer {
         })
     }
 
-    /// Parse TRC line (Peak format)
-    fn parse_trc_line(line: &str) -> Result<CanFrame, String> {
-        // TRC format: " Time Type ID DLC Data"
-        // Example: "  0.001234 Rx 123 8 01 02 03 04 05 06 07 08"
+    /// Parse TRC line (PCAN-Explorer format)
+    /// Format: N O T B I d R L D
+    /// Example: "1        77.686 DT 3      0132 Rx -  8    C4 00 00 00 00 00 00 00"
+    /// N = Number, O = Time Offset (ms), T = Type, B = Bus, I = ID (hex), d = direction, R = Reserved, L = Length, D = Data
+    fn parse_trc_line(
+        line: &str,
+        start_time_days: Option<f64>,
+        bus_to_channel: &Option<std::collections::HashMap<u8, String>>,
+    ) -> Result<CanFrame, String> {
         let parts: Vec<&str> = line.split_whitespace().collect();
-        if parts.len() < 5 {
-            return Err("Invalid TRC line format".to_string());
+        if parts.len() < 9 {
+            return Err(format!("Invalid TRC line format: not enough fields. Line: {}", line));
         }
 
-        let timestamp_ms = parts[0].trim().parse::<f64>().map_err(|e| {
-            format!("Failed to parse timestamp: {}", e)
+        // Parse time offset (column O) - milliseconds from STARTTIME
+        let time_offset_ms = parts[1].trim().parse::<f64>().map_err(|e| {
+            format!("Failed to parse time offset: {}", e)
         })?;
-        let timestamp = timestamp_ms / 1000.0; // Convert to seconds
+        
+        // Calculate absolute timestamp
+        // STARTTIME is MS Basic Decimal Days since Dec 31, 1899
+        // Convert to seconds since Unix epoch, then add time offset
+        let timestamp = if let Some(start_days) = start_time_days {
+            // Convert MS Basic days to Unix timestamp
+            // Dec 31, 1899 to Jan 1, 1970 = 25569 days
+            let unix_epoch_days = 25569.0;
+            let days_since_epoch = start_days - unix_epoch_days;
+            let seconds_since_epoch = days_since_epoch * 86400.0;
+            seconds_since_epoch + (time_offset_ms / 1000.0)
+        } else {
+            // If no STARTTIME, use relative time from start (offset in seconds)
+            time_offset_ms / 1000.0
+        };
 
-        let type_str = parts[1].trim();
-        let is_extended = type_str == "Rx" || type_str == "Tx";
-        let direction = if type_str.to_lowercase().starts_with('r') {
+        // Parse type (column T) - usually "DT" for data
+        let _type_str = parts[2].trim();
+
+        // Parse bus number (column B)
+        let bus_num = parts[3].trim().parse::<u8>().map_err(|e| {
+            format!("Failed to parse bus number: {}", e)
+        })?;
+
+        // Map bus number to channel ID
+        let channel = if let Some(ref mapping) = bus_to_channel {
+            mapping.get(&bus_num)
+                .cloned()
+                .unwrap_or_else(|| {
+                    log::warn!("Bus {} not found in mapping, using fallback channel_{}. Available buses: {:?}", 
+                        bus_num, bus_num, mapping.keys().collect::<Vec<_>>());
+                    format!("channel_{}", bus_num)
+                })
+        } else {
+            log::warn!("No bus-to-channel mapping provided, using channel_{}", bus_num);
+            format!("channel_{}", bus_num)
+        };
+
+        // Parse ID (column I) - hex without 0x prefix
+        let id_str = parts[4].trim();
+        let id = u32::from_str_radix(id_str, 16).map_err(|e| {
+            format!("Failed to parse ID '{}': {}", id_str, e)
+        })?;
+
+        // Determine if extended (29-bit) - IDs > 0x7FF are extended
+        let is_extended = id > 0x7FF;
+
+        // Parse direction (column d)
+        let direction_str = parts[5].trim();
+        let direction = if direction_str.to_lowercase().starts_with('r') {
             "rx"
         } else {
             "tx"
         };
 
-        let id_str = parts[2].trim().replace("0x", "").replace("0X", "");
-        let id = u32::from_str_radix(&id_str, 16).map_err(|e| {
-            format!("Failed to parse ID: {}", e)
-        })?;
-
-        let dlc = parts[3].trim().parse::<u8>().map_err(|e| {
+        // Reserved (column R) - skip
+        // Parse length/DLC (column L)
+        let dlc = parts[7].trim().parse::<u8>().map_err(|e| {
             format!("Failed to parse DLC: {}", e)
         })?;
 
-        let data: Result<Vec<u8>, _> = parts[4..]
+        // Parse data (column D) - hex bytes
+        let data: Result<Vec<u8>, _> = parts[8..]
             .iter()
             .take(dlc as usize)
             .map(|b| u8::from_str_radix(b, 16))
@@ -287,7 +374,7 @@ impl TracePlayer {
             dlc,
             data,
             timestamp,
-            channel: "playback".to_string(),
+            channel,
             direction: direction.to_string(),
         })
     }
@@ -300,7 +387,7 @@ impl Default for TracePlayer {
 }
 
 /// Trace file format for parsing
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 enum TraceFormat {
     Csv,
     Trc,

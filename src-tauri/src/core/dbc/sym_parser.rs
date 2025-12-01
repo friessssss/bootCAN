@@ -22,6 +22,7 @@ impl SymParser {
         let mut current_message_id: Option<u32> = None;
         let mut current_message_name: Option<String> = None;
         let mut current_message_dlc: Option<u8> = None;
+        let mut current_message_extended: bool = false;
         let mut in_signals_section = false;
         let mut in_sendreceive_section = false;
 
@@ -51,8 +52,8 @@ impl SymParser {
                     db.version = Some(version.trim().to_string());
                 }
             }
-            // Parse Enum definitions: Enum=name(value="Name", ...)
-            else if line.starts_with("Enum=") {
+            // Parse Enum definitions: enum Name(value="Name", ...) or Enum=name(value="Name", ...)
+            else if line.starts_with("enum ") || line.starts_with("Enum=") {
                 if let Some((name, values)) = Self::parse_enum(line) {
                     value_tables.insert(name, values);
                 }
@@ -71,6 +72,14 @@ impl SymParser {
                     current_message_name = Some(name);
                     current_message_id = None;
                     current_message_dlc = None;
+                    current_message_extended = false; // Reset extended flag for new message
+                }
+            }
+            // Parse Type=Extended or Type=Standard
+            else if in_sendreceive_section && current_message_name.is_some() && line.starts_with("Type=") {
+                if let Some(type_part) = line.split("Type=").nth(1) {
+                    let msg_type = type_part.split_whitespace().next().unwrap_or("").trim();
+                    current_message_extended = msg_type.eq_ignore_ascii_case("Extended");
                 }
             }
             // Parse ID=xxxh (part of message header)
@@ -86,14 +95,16 @@ impl SymParser {
                                 &mut current_message_name,
                                 &mut current_message_id,
                                 &mut current_message_dlc,
+                                &mut current_message_extended,
                             );
                         }
                     }
                 }
             }
-            // Parse Len=x (part of message header)
-            else if in_sendreceive_section && current_message_name.is_some() && line.starts_with("Len=") {
-                if let Some(dlc_part) = line.split("Len=").nth(1) {
+            // Parse DLC=x or Len=x (part of message header)
+            else if in_sendreceive_section && current_message_name.is_some() && (line.starts_with("DLC=") || line.starts_with("Len=")) {
+                let prefix = if line.starts_with("DLC=") { "DLC=" } else { "Len=" };
+                if let Some(dlc_part) = line.split(prefix).nth(1) {
                     if let Some(dlc_str) = dlc_part.split_whitespace().next() {
                         if let Ok(dlc) = dlc_str.parse::<u8>() {
                             current_message_dlc = Some(dlc);
@@ -103,6 +114,7 @@ impl SymParser {
                                 &mut current_message_name,
                                 &mut current_message_id,
                                 &mut current_message_dlc,
+                                &mut current_message_extended,
                             );
                         }
                     }
@@ -119,33 +131,9 @@ impl SymParser {
                     }
                 }
             }
-            // Parse variable assignment: Var=name type bit,length /e:enum
+            // Parse variable assignment: Var=name type bit,length /u:unit /f:factor /o:offset /e:enum /d:default /max:max /min:min
             else if in_sendreceive_section && current_message_id.is_some() && line.starts_with("Var=") {
-                if let Some((var_name, bit_pos, length, signal_type, enum_name)) = Self::parse_variable(line) {
-                    let value_type = match signal_type.as_str() {
-                        "unsigned" => ValueType::Unsigned,
-                        "signed" => ValueType::Signed,
-                        "float" => ValueType::Float,
-                        "double" => ValueType::Double,
-                        _ => ValueType::Unsigned,
-                    };
-                    
-                    let signal = Signal {
-                        name: var_name,
-                        start_bit: bit_pos,
-                        length,
-                        byte_order: ByteOrder::LittleEndian,
-                        value_type,
-                        factor: 1.0,
-                        offset: 0.0,
-                        minimum: None,
-                        maximum: None,
-                        unit: String::new(),
-                        receivers: vec![],
-                        comment: None,
-                        value_table: enum_name,
-                    };
-                    
+                if let Some(signal) = Self::parse_variable(line) {
                     if let Some(message) = db.messages.get_mut(&current_message_id.unwrap()) {
                         message.signals.push(signal);
                     }
@@ -174,27 +162,41 @@ impl SymParser {
     }
 
     fn parse_enum(line: &str) -> Option<(String, HashMap<i64, String>)> {
-        // Enum=name(value="Name", value2="Name2", ...)
-        let parts: Vec<&str> = line.split('=').collect();
-        if parts.len() < 2 {
+        // enum Name(value="Name", value2="Name2", ...) or Enum=name(value="Name", ...)
+        let line_trimmed = if line.starts_with("enum ") {
+            &line[5..] // Skip "enum "
+        } else if line.starts_with("Enum=") {
+            &line[5..] // Skip "Enum="
+        } else {
             return None;
-        }
+        };
 
-        let name = parts[1].split('(').next()?.trim().to_string();
-        let values_str = line.split('(').nth(1)?.trim_end_matches(')');
-        let mut values = HashMap::new();
+        // Find the opening parenthesis
+        if let Some(open_paren) = line_trimmed.find('(') {
+            let name = line_trimmed[..open_paren].trim().to_string();
+            let values_str = if let Some(close_paren) = line_trimmed.rfind(')') {
+                &line_trimmed[open_paren + 1..close_paren]
+            } else {
+                return None;
+            };
 
-        // Parse value="Name" pairs
-        let re = regex::Regex::new(r#"(\d+)="([^"]+)""#).ok()?;
-        for cap in re.captures_iter(values_str) {
-            if let (Some(value_str), Some(name_str)) = (cap.get(1), cap.get(2)) {
-                if let Ok(value) = value_str.as_str().parse::<i64>() {
-                    values.insert(value, name_str.as_str().to_string());
+            let mut values = HashMap::new();
+
+            // Parse value="Name" pairs
+            // Format: 97="SEP2 VTG Discharging", 96="CAN VTG Discharging", ...
+            let re = regex::Regex::new(r#"(\d+)="([^"]+)""#).ok()?;
+            for cap in re.captures_iter(values_str) {
+                if let (Some(value_str), Some(name_str)) = (cap.get(1), cap.get(2)) {
+                    if let Ok(value) = value_str.as_str().parse::<i64>() {
+                        values.insert(value, name_str.as_str().to_string());
+                    }
                 }
             }
-        }
 
-        Some((name, values))
+            Some((name, values))
+        } else {
+            None
+        }
     }
 
     fn parse_signal(line: &str) -> Option<Signal> {
@@ -263,6 +265,7 @@ impl SymParser {
         name: &mut Option<String>,
         id: &mut Option<u32>,
         dlc: &mut Option<u8>,
+        extended: &mut bool,
     ) {
         // Only create message if we have all three required fields
         if name.is_some() && id.is_some() && dlc.is_some() {
@@ -270,17 +273,27 @@ impl SymParser {
             let message_id = id.take().unwrap();
             let message_dlc = dlc.take().unwrap();
             
+            // If extended flag is set, ensure ID is treated as extended
+            // (The ID itself should already be correct, but we can verify)
+            let final_id = if *extended && message_id <= 0x7FF {
+                // If Type=Extended but ID looks standard, keep as-is (might be a low extended ID)
+                message_id
+            } else {
+                message_id
+            };
+            
             let message = Message {
-                id: message_id,
+                id: final_id,
                 name: message_name,
                 dlc: message_dlc,
                 sender: None,
                 signals: vec![],
                 comment: None,
             };
-            db.messages.insert(message_id, message);
+            db.messages.insert(final_id, message);
             // Restore id for signal parsing
-            *id = Some(message_id);
+            *id = Some(final_id);
+            *extended = false; // Reset for next message
         }
     }
 
@@ -297,30 +310,74 @@ impl SymParser {
         Some((signal_name, bit_pos))
     }
 
-    fn parse_variable(line: &str) -> Option<(String, u8, u8, String, Option<String>)> {
-        // Var=name type bit,length /e:enum
-        // Example: Var=fault_LOCPSC_ALC unsigned 8,1
+    fn parse_variable(line: &str) -> Option<Signal> {
+        // Var=name type bit,length /u:unit /f:factor /o:offset /e:enum /d:default /max:max /min:min
+        // Example: Var=V2BCMDLifeSignal unsigned 0,8 /e:VtSig_V2BCMDLifeSignal
+        // Example: Var=B2VST2SOC unsigned 0,8 /u:% /f:0.4 /max:100 /e:VtSig_V2BCMDLifeSignal /d:0
         let parts: Vec<&str> = line.split_whitespace().collect();
         if parts.len() < 3 {
             return None;
         }
 
         let var_name = parts[0].trim_start_matches("Var=").to_string();
-        let signal_type = parts[1].to_string();
+        let signal_type = parts[1];
         
         let bit_length = parts[2];
         let bit_length_parts: Vec<&str> = bit_length.split(',').collect();
         let bit_pos = bit_length_parts[0].parse::<u8>().ok()?;
         let length = bit_length_parts.get(1).and_then(|s| s.parse::<u8>().ok())?;
 
+        let value_type = match signal_type {
+            "unsigned" => ValueType::Unsigned,
+            "signed" => ValueType::Signed,
+            "float" => ValueType::Float,
+            "double" => ValueType::Double,
+            "bit" => ValueType::Unsigned, // Treat bit as unsigned
+            _ => ValueType::Unsigned,
+        };
+
+        let mut factor = 1.0;
+        let mut offset = 0.0;
+        let mut unit = String::new();
+        let mut min_val = None;
+        let mut max_val = None;
         let mut enum_name = None;
+        let mut _default_val = None; // Default value (not used in decoding, but parsed for completeness)
+
+        // Parse attributes
         for part in parts.iter().skip(3) {
-            if part.starts_with("/e:") {
+            if part.starts_with("/f:") {
+                factor = part.trim_start_matches("/f:").parse::<f64>().unwrap_or(1.0);
+            } else if part.starts_with("/o:") {
+                offset = part.trim_start_matches("/o:").parse::<f64>().unwrap_or(0.0);
+            } else if part.starts_with("/u:") {
+                unit = part.trim_start_matches("/u:").to_string();
+            } else if part.starts_with("/e:") {
                 enum_name = Some(part.trim_start_matches("/e:").to_string());
+            } else if part.starts_with("/d:") {
+                _default_val = part.trim_start_matches("/d:").parse::<f64>().ok();
+            } else if part.starts_with("/max:") {
+                max_val = part.trim_start_matches("/max:").parse::<f64>().ok();
+            } else if part.starts_with("/min:") {
+                min_val = part.trim_start_matches("/min:").parse::<f64>().ok();
             }
         }
 
-        Some((var_name, bit_pos, length, signal_type, enum_name))
+        Some(Signal {
+            name: var_name,
+            start_bit: bit_pos,
+            length,
+            byte_order: ByteOrder::LittleEndian, // SYM files typically use little-endian
+            value_type,
+            factor,
+            offset,
+            minimum: min_val,
+            maximum: max_val,
+            unit,
+            receivers: vec![],
+            comment: None,
+            value_table: enum_name,
+        })
     }
 }
 

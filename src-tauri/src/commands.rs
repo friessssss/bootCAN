@@ -720,10 +720,54 @@ pub async fn stop_logging(state: State<'_, AppState>) -> Result<(), String> {
 pub async fn load_trace(
     state: State<'_, AppState>,
     file_path: String,
+    bus_to_channel_map: Option<std::collections::HashMap<u8, String>>,
 ) -> Result<usize, String> {
+    // Build bus-to-channel mapping
+    // If provided by frontend, use it; otherwise build from DBC databases
+    let bus_to_channel = if let Some(map) = bus_to_channel_map {
+        log::info!("Using provided bus-to-channel mapping: {:?}", map);
+        Some(map)
+    } else {
+        // Build bus-to-channel mapping from DBC database channel IDs
+        // This ensures trace frames use the same channel IDs that signals are selected with
+        let dbc_databases = state.dbc_databases.read();
+        let mut mapping = std::collections::HashMap::new();
+        
+        // Use DBC database channel IDs directly (these are what signals are selected with)
+        // Sort them to ensure consistent ordering (by channel ID string)
+        let mut dbc_channel_ids: Vec<_> = dbc_databases.keys().cloned().collect();
+        dbc_channel_ids.sort(); // Sort for consistent ordering
+        
+        if !dbc_channel_ids.is_empty() {
+            // Map bus number (1-indexed) to DBC channel ID
+            // Bus 1 -> first DBC channel, Bus 2 -> second DBC channel, etc.
+            for (idx, channel_id) in dbc_channel_ids.iter().enumerate() {
+                mapping.insert((idx + 1) as u8, channel_id.clone());
+                log::debug!("Mapping bus {} -> channel {}", idx + 1, channel_id);
+            }
+        } else {
+            // Fallback: if no DBC files are loaded, use channel manager channel IDs
+            let manager = state.channel_manager.read();
+            let mut channel_ids: Vec<_> = manager.get_channel_ids().iter().cloned().collect();
+            channel_ids.sort(); // Sort for consistent ordering
+            for (idx, channel_id) in channel_ids.iter().enumerate() {
+                mapping.insert((idx + 1) as u8, channel_id.clone());
+                log::debug!("Mapping bus {} -> channel {} (no DBC)", idx + 1, channel_id);
+            }
+        }
+        
+        log::info!("Auto-generated bus to channel mapping: {:?}", mapping);
+        if mapping.is_empty() {
+            log::warn!("No channels found for bus-to-channel mapping!");
+            None
+        } else {
+            Some(mapping)
+        }
+    };
+
     let count = {
         let mut player = state.trace_player.write().await;
-        player.load_file(PathBuf::from(file_path)).await?
+        player.load_file(PathBuf::from(file_path), bus_to_channel).await?
     };
     Ok(count)
 }
@@ -739,55 +783,32 @@ pub async fn start_playback(
         player.start()?;
     }
 
-    // Get active channel for sending
-    let channel = {
-        let manager = state.channel_manager.read();
-        manager.get_active_channel()
-    };
+    // Start playback loop - just emit frames, don't send to hardware
+    let player_clone = state.trace_player.clone();
+    let app_clone = app.clone();
 
-    if let Some(channel) = channel {
-        let channel_clone = channel.clone();
-        let player_clone = state.trace_player.clone();
-        let app_clone = app.clone();
-
-            tokio::spawn(async move {
-            loop {
-                let (frame, delay) = {
-                    let mut player = player_clone.write().await;
-                    match player.get_next_frame() {
-                        Some((f, d)) => (f, d),
-                        None => break,
-                    }
-                };
-
-                // Wait for the delay
-                tokio::time::sleep(delay).await;
-
-                // Send frame
-                let frame_to_send = frame.clone();
-                let send_result = tokio::task::spawn_blocking({
-                    let channel = channel_clone.clone();
-                    move || {
-                        let mut ch = channel.write();
-                        if ch.state == ChannelState::Connected {
-                            tokio::runtime::Handle::current().block_on(ch.send(frame_to_send))
-                        } else {
-                            Ok(())
-                        }
-                    }
-                }).await;
-
-                if let Err(e) = send_result {
-                    log::error!("Failed to send playback frame: {}", e);
-                } else if let Err(e) = send_result.unwrap() {
-                    log::error!("Failed to send playback frame: {}", e);
+    tokio::spawn(async move {
+        loop {
+            let (frame, delay) = {
+                let mut player = player_clone.write().await;
+                match player.get_next_frame() {
+                    Some((f, d)) => (f, d),
+                    None => break,
                 }
+            };
 
-                // Emit to frontend
-                let _ = app_clone.emit("can-message", frame);
+            // Wait for the delay
+            tokio::time::sleep(delay).await;
+
+            // Emit to frontend (this is what the plot needs)
+            // The frame already has the correct channel set from bus mapping
+            if let Err(e) = app_clone.emit("can-message", &frame) {
+                log::error!("Failed to emit can-message event: {:?}", e);
+            } else {
+                log::trace!("Emitted frame: ID=0x{:X} channel={} timestamp={}", frame.id, frame.channel, frame.timestamp);
             }
-        });
-    }
+        }
+    });
 
     Ok(())
 }
@@ -838,6 +859,15 @@ pub async fn get_playback_state(
         PlaybackState::Playing => "playing".to_string(),
         PlaybackState::Paused => "paused".to_string(),
     })
+}
+
+/// Get all frames from loaded trace (for immediate decoding)
+#[tauri::command]
+pub async fn get_trace_frames(
+    state: State<'_, AppState>,
+) -> Result<Vec<CanFrame>, String> {
+    let player = state.trace_player.read().await;
+    Ok(player.get_all_frames())
 }
 
 /// Load a DBC or SYM file for a channel
@@ -903,6 +933,70 @@ pub async fn get_message_info(
     } else {
         Ok(None)
     }
+}
+
+/// Signal information for plotting
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SignalInfo {
+    pub name: String,
+    pub unit: String,
+    pub value_type: String,
+}
+
+/// Message with signals for plotting
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MessageWithSignals {
+    pub channel_id: String,
+    pub message_id: u32,
+    pub message_name: String,
+    pub signals: Vec<SignalInfo>,
+}
+
+/// Get all available signals from all loaded DBC files
+#[tauri::command]
+pub async fn get_all_signals(
+    state: State<'_, AppState>,
+) -> Result<Vec<MessageWithSignals>, String> {
+    let databases = {
+        let db_map = state.dbc_databases.read();
+        db_map.clone()
+    };
+    
+    let mut result = Vec::new();
+    
+    for (channel_id, db) in databases.iter() {
+        for (message_id, message) in db.messages.iter() {
+            let signals: Vec<SignalInfo> = message.signals
+                .iter()
+                .map(|signal| {
+                    let value_type = match signal.value_type {
+                        crate::core::dbc::models::ValueType::Unsigned => "unsigned",
+                        crate::core::dbc::models::ValueType::Signed => "signed",
+                        crate::core::dbc::models::ValueType::Float => "float",
+                        crate::core::dbc::models::ValueType::Double => "double",
+                    };
+                    SignalInfo {
+                        name: signal.name.clone(),
+                        unit: signal.unit.clone(),
+                        value_type: value_type.to_string(),
+                    }
+                })
+                .collect();
+            
+            if !signals.is_empty() {
+                result.push(MessageWithSignals {
+                    channel_id: channel_id.clone(),
+                    message_id: *message_id,
+                    message_name: message.name.clone(),
+                    signals,
+                });
+            }
+        }
+    }
+    
+    Ok(result)
 }
 
 /// Project file structures

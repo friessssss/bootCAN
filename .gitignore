@@ -47,3 +47,14 @@ coverage/
 *.dbc.tar.bz2
 *.dbc.tar.xz
 
+# Trace files
+*.trc
+*.csv
+*.log
+*.txt
+*.log.gz
+*.log.bz2
+*.log.xz
+*.log.tar
+*.log.tar.gz 
+

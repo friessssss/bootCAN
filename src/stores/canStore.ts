@@ -51,6 +51,17 @@ export interface TransmitJob {
   backendJobId?: string; // ID returned by backend for cancellation
 }
 
+export interface PlotSignal {
+  channelId: string;
+  messageId: number;
+  signalName: string;
+}
+
+export interface PlotDataPoint {
+  time: number;
+  value: number;
+}
+
 export type ConnectionStatus =
   | "disconnected"
   | "connecting"
@@ -123,6 +134,14 @@ interface CanState {
   viewMode: "trace" | "monitor";
   setViewMode: (mode: "trace" | "monitor") => void;
 
+  // Plot state
+  viewTab: "monitor" | "plot";
+  selectedPlotSignals: PlotSignal[];
+  plotData: Map<string, PlotDataPoint[]>; // key: `${channelId}-${messageId}-${signalName}`
+  isPlotPaused: boolean;
+  plotTimeWindow: number; // seconds
+  plotMaxDataPoints: number;
+
   // Actions
   initializeBackend: () => Promise<void>;
   connect: () => Promise<void>;
@@ -174,6 +193,15 @@ interface CanState {
   // Project file actions
   saveProject: (filePath: string) => Promise<void>;
   loadProject: (filePath: string) => Promise<void>;
+  
+  // Plot actions
+  setViewTab: (tab: "monitor" | "plot") => void;
+  addPlotSignal: (signal: PlotSignal) => void;
+  removePlotSignal: (signal: PlotSignal) => void;
+  clearPlotData: () => void;
+  togglePlotPause: () => void;
+  setPlotTimeWindow: (window: number) => void;
+  setPlotData: (data: Map<string, PlotDataPoint[]>) => void;
 }
 
 // Event listener cleanup
@@ -222,6 +250,14 @@ export const useCanStore = create<CanState>((set, get) => ({
 
   setViewMode: (mode: "trace" | "monitor") => set({ viewMode: mode }),
 
+  // Plot state initialization
+  viewTab: "monitor",
+  selectedPlotSignals: [],
+  plotData: new Map<string, PlotDataPoint[]>(),
+  isPlotPaused: false,
+  plotTimeWindow: 10, // seconds
+  plotMaxDataPoints: 5000,
+
   // Initialize backend and set up event listeners
   initializeBackend: async () => {
     // Prevent duplicate initialization (React StrictMode calls effects twice)
@@ -246,42 +282,49 @@ export const useCanStore = create<CanState>((set, get) => ({
 
       // Set up event listeners for incoming messages
       console.log("Setting up can-message listener...");
-      unlistenMessage = await listen<CanFrame>("can-message", (event) => {
+      unlistenMessage = await listen<CanFrame>("can-message", async (event) => {
         const state = get();
         if (state.isPaused) return;
 
         const newFrame = event.payload;
+        
+        // Check if this is from trace playback (has loadedTraceFile and playback is active)
+        const isTracePlayback = state.loadedTraceFile !== null && 
+                                (state.playbackState === "playing" || state.playbackState === "paused");
+        
         // Include channel in key so same ID on different channels are separate
         const monitorKey = `${newFrame.channel}-${newFrame.id}-${newFrame.direction}`;
         
-        // Always update both buffers
         set((s) => {
-          // Update monitor map with count and cycle time
-          const newMonitorMessages = new Map(s.monitorMessages);
-          const existing = newMonitorMessages.get(monitorKey);
-          
-          let cycleTime = 0;
-          let count = 1;
-          
-          if (existing) {
-            count = existing.count + 1;
-            // Calculate cycle time in ms
-            cycleTime = (newFrame.timestamp - existing.lastTimestamp) * 1000;
+          // Only update monitor messages for live CAN data, not trace playback
+          let newMonitorMessages = s.monitorMessages;
+          if (!isTracePlayback) {
+            newMonitorMessages = new Map(s.monitorMessages);
+            const existing = newMonitorMessages.get(monitorKey);
+            
+            let cycleTime = 0;
+            let count = 1;
+            
+            if (existing) {
+              count = existing.count + 1;
+              // Calculate cycle time in ms
+              cycleTime = (newFrame.timestamp - existing.lastTimestamp) * 1000;
+            }
+            
+            newMonitorMessages.set(monitorKey, {
+              frame: newFrame,
+              count,
+              cycleTime,
+              lastTimestamp: newFrame.timestamp,
+            });
           }
           
-          newMonitorMessages.set(monitorKey, {
-            frame: newFrame,
-            count,
-            cycleTime,
-            lastTimestamp: newFrame.timestamp,
-          });
-          
-          // Only append to trace if recording is active
+          // Only append to trace if recording is active (live data only, not trace playback)
           let newTraceMessages = s.traceMessages;
           let newRecordingStartTime = s.recordingStartTime;
           
-          if (s.isRecording) {
-            // If this is the first message after starting recording, use its timestamp as reference
+          if (s.isRecording && !isTracePlayback) {
+            // Live recording: If this is the first message after starting recording, use its timestamp as reference
             if (newRecordingStartTime === null) {
               newRecordingStartTime = newFrame.timestamp;
             }
@@ -290,6 +333,7 @@ export const useCanStore = create<CanState>((set, get) => ({
             const frameWithRelativeTime = { ...newFrame, timestamp: relativeTimestamp };
             newTraceMessages = [...s.traceMessages, frameWithRelativeTime].slice(-s.maxMessages);
           }
+          // Note: Trace playback messages are already loaded into traceMessages, so we don't add them again
           
           return {
             traceMessages: newTraceMessages,
@@ -297,6 +341,84 @@ export const useCanStore = create<CanState>((set, get) => ({
             recordingStartTime: newRecordingStartTime,
           };
         });
+
+        // Decode signals for plot if not paused and signals are selected
+        const currentState = get();
+        if (!currentState.isPlotPaused && currentState.selectedPlotSignals.length > 0) {
+          // Find signals that match this message
+          const matchingSignals = currentState.selectedPlotSignals.filter(
+            (sig) => sig.channelId === newFrame.channel && sig.messageId === newFrame.id
+          );
+
+          if (matchingSignals.length > 0) {
+            if (!currentState.loadedDbcFiles.has(newFrame.channel)) {
+              console.debug(`Plot: No DBC loaded for channel ${newFrame.channel}, message 0x${newFrame.id.toString(16)}`);
+            } else {
+              // Decode all signals for this message
+              invoke<Array<{ name: string; physicalValue: number }>>("decode_message", {
+                channelId: newFrame.channel,
+                messageId: newFrame.id,
+                data: newFrame.data,
+              })
+                .then((decodedSignals) => {
+                  const state = get();
+                  const newPlotData = new Map(state.plotData);
+                  const currentTime = newFrame.timestamp;
+                  const timeWindow = state.plotTimeWindow;
+                  const maxPoints = state.plotMaxDataPoints;
+
+                  // Update data for each matching signal
+                  for (const signal of matchingSignals) {
+                    const decoded = decodedSignals.find((s) => s.name === signal.signalName);
+                    if (decoded) {
+                      const key = `${signal.channelId}-${signal.messageId}-${signal.signalName}`;
+                      let dataPoints = newPlotData.get(key) || [];
+
+                      // Add new data point
+                      dataPoints.push({ time: currentTime, value: decoded.physicalValue });
+
+                      // Remove points outside time window
+                      const cutoffTime = currentTime - timeWindow;
+                      dataPoints = dataPoints.filter((pt) => pt.time >= cutoffTime);
+
+                      // Trim to max points (keep most recent)
+                      if (dataPoints.length > maxPoints) {
+                        dataPoints = dataPoints.slice(-maxPoints);
+                      }
+
+                      newPlotData.set(key, dataPoints);
+                    } else {
+                      console.debug(`Plot: Signal ${signal.signalName} not found in decoded signals for message 0x${newFrame.id.toString(16)}`);
+                    }
+                  }
+
+                  set({ plotData: newPlotData });
+                })
+                .catch((error) => {
+                  console.debug("Failed to decode signals for plot:", error, {
+                    channel: newFrame.channel,
+                    messageId: newFrame.id,
+                    selectedSignals: matchingSignals.map(s => s.signalName),
+                  });
+                });
+            }
+          } else {
+            // Debug: log when we have selected signals but they don't match
+            if (currentState.selectedPlotSignals.length > 0) {
+              console.debug(`Plot: Message 0x${newFrame.id.toString(16)} on channel ${newFrame.channel} doesn't match selected signals`, {
+                selectedSignals: currentState.selectedPlotSignals.map(s => ({
+                  channel: s.channelId,
+                  message: `0x${s.messageId.toString(16)}`,
+                  signal: s.signalName,
+                })),
+                receivedMessage: {
+                  channel: newFrame.channel,
+                  message: `0x${newFrame.id.toString(16)}`,
+                },
+              });
+            }
+          }
+        }
       });
       console.log("can-message listener set up");
 
@@ -395,10 +517,17 @@ export const useCanStore = create<CanState>((set, get) => ({
     const state = get();
     if (state.viewMode === "monitor") {
       // Return monitor entries sorted by ID
+      // Monitor mode doesn't use traceMessages, so we can skip that dependency
       return Array.from(state.monitorMessages.values()).sort((a, b) => a.frame.id - b.frame.id);
     } else {
       // Return all trace messages wrapped as MonitorEntry for consistent interface
-      return state.traceMessages.map(frame => ({
+      // Limit to maxMessages to prevent performance issues with very large traces
+      const maxTraceMessages = state.maxMessages;
+      const messagesToShow = state.traceMessages.length > maxTraceMessages
+        ? state.traceMessages.slice(-maxTraceMessages)
+        : state.traceMessages;
+      
+      return messagesToShow.map(frame => ({
         frame,
         count: 0,
         cycleTime: 0,
@@ -545,8 +674,53 @@ export const useCanStore = create<CanState>((set, get) => ({
   // Trace playback actions
   loadTrace: async (filePath: string) => {
     try {
-      const count = await invoke<number>("load_trace", { filePath });
-      set({ loadedTraceFile: filePath, playbackFrameCount: count, playbackCurrentIndex: 0 });
+      // Build bus-to-channel mapping based on channel numbers
+      // Extract channel number from channel name (e.g., "Channel 3" -> bus 3)
+      const state = get();
+      const busToChannelMap = new Map<number, string>();
+      
+      for (const channel of state.channels) {
+        // Extract number from channel name (e.g., "Channel 3" -> 3)
+        const match = channel.name.match(/\d+/);
+        if (match) {
+          const busNum = parseInt(match[0], 10);
+          if (busNum > 0 && busNum <= 255) {
+            // Only map if this channel has a DBC file loaded
+            if (state.loadedDbcFiles.has(channel.id)) {
+              busToChannelMap.set(busNum, channel.id);
+              console.log(`Mapping bus ${busNum} -> channel ${channel.id} (${channel.name})`);
+            }
+          }
+        }
+      }
+      
+      // Convert Map to object for Tauri
+      const mappingObj: Record<string, string> = {};
+      busToChannelMap.forEach((channelId, busNum) => {
+        mappingObj[busNum.toString()] = channelId;
+      });
+      
+      const count = await invoke<number>("load_trace", { 
+        filePath,
+        busToChannelMap: Object.keys(mappingObj).length > 0 ? mappingObj : undefined
+      });
+      
+      // Load all frames directly into traceMessages (fast, bypasses event listener)
+      const allFrames = await invoke<CanFrame[]>("get_trace_frames");
+      
+      // Calculate relative timestamps (first frame = 0)
+      const firstTimestamp = allFrames.length > 0 ? allFrames[0].timestamp : 0;
+      const traceFrames = allFrames.map(frame => ({
+        ...frame,
+        timestamp: frame.timestamp - firstTimestamp
+      }));
+      
+      set({ 
+        loadedTraceFile: filePath, 
+        playbackFrameCount: count, 
+        playbackCurrentIndex: 0,
+        traceMessages: traceFrames // Load directly into trace tab, not monitor
+      });
     } catch (error) {
       console.error("Failed to load trace:", error);
       throw error;
@@ -892,6 +1066,66 @@ export const useCanStore = create<CanState>((set, get) => ({
       throw error;
     }
   },
+
+  // Plot actions
+  setViewTab: (tab: "monitor" | "plot") => set({ viewTab: tab }),
+
+  addPlotSignal: (signal: PlotSignal) => {
+    set((s) => {
+      const key = `${signal.channelId}-${signal.messageId}-${signal.signalName}`;
+      // Check if already exists
+      if (s.selectedPlotSignals.some(
+        (sig) => sig.channelId === signal.channelId &&
+                 sig.messageId === signal.messageId &&
+                 sig.signalName === signal.signalName
+      )) {
+        return {};
+      }
+      // Initialize empty data array for this signal
+      const newPlotData = new Map(s.plotData);
+      if (!newPlotData.has(key)) {
+        newPlotData.set(key, []);
+      }
+      return {
+        selectedPlotSignals: [...s.selectedPlotSignals, signal],
+        plotData: newPlotData,
+      };
+    });
+  },
+
+  removePlotSignal: (signal: PlotSignal) => {
+    set((s) => {
+      const key = `${signal.channelId}-${signal.messageId}-${signal.signalName}`;
+      const newPlotData = new Map(s.plotData);
+      newPlotData.delete(key);
+      return {
+        selectedPlotSignals: s.selectedPlotSignals.filter(
+          (sig) => !(sig.channelId === signal.channelId &&
+                     sig.messageId === signal.messageId &&
+                     sig.signalName === signal.signalName)
+        ),
+        plotData: newPlotData,
+      };
+    });
+  },
+
+  clearPlotData: () => {
+    set((s) => {
+      const newPlotData = new Map<string, PlotDataPoint[]>();
+      // Keep the structure but clear all data
+      for (const signal of s.selectedPlotSignals) {
+        const key = `${signal.channelId}-${signal.messageId}-${signal.signalName}`;
+        newPlotData.set(key, []);
+      }
+      return { plotData: newPlotData };
+    });
+  },
+
+  togglePlotPause: () => set((s) => ({ isPlotPaused: !s.isPlotPaused })),
+
+  setPlotTimeWindow: (window: number) => set({ plotTimeWindow: window }),
+
+  setPlotData: (data: Map<string, PlotDataPoint[]>) => set({ plotData: data }),
 }));
 
 // Cleanup function for unmounting

@@ -10,7 +10,7 @@ import {
 } from "./icons";
 
 export function Toolbar() {
-  const { isPaused, togglePause, clearMessages, traceMessages, connectionStatus, viewMode, setViewMode, isRecording, toggleRecording, saveProject, loadProject } =
+  const { isPaused, togglePause, clearMessages, traceMessages, connectionStatus, viewMode, setViewMode, isRecording, toggleRecording, saveProject, loadProject, viewTab, setViewTab } =
     useCanStore();
 
   const handleExport = () => {
@@ -88,8 +88,36 @@ export function Toolbar() {
         </h1>
       </div>
 
-      {/* Center - Main Controls */}
-      <div className="flex items-center gap-2">
+      {/* Center - View Tabs & Main Controls */}
+      <div className="flex items-center gap-4">
+        {/* View Tab Toggle */}
+        <div className="flex items-center bg-can-bg-tertiary rounded-md p-0.5">
+          <button
+            onClick={() => setViewTab("monitor")}
+            className={`px-3 py-1 text-sm rounded transition-colors ${
+              viewTab === "monitor"
+                ? "bg-can-accent-blue text-white"
+                : "text-can-text-secondary hover:text-can-text-primary"
+            }`}
+          >
+            Monitor
+          </button>
+          <button
+            onClick={() => setViewTab("plot")}
+            className={`px-3 py-1 text-sm rounded transition-colors ${
+              viewTab === "plot"
+                ? "bg-can-accent-blue text-white"
+                : "text-can-text-secondary hover:text-can-text-primary"
+            }`}
+          >
+            Plot
+          </button>
+        </div>
+
+        <div className="w-px h-6 bg-can-border" />
+
+        {/* Main Controls */}
+        <div className="flex items-center gap-2">
         <button
           onClick={togglePause}
           className={`btn ${isPaused ? "btn-success" : "btn-secondary"} flex items-center gap-2`}
@@ -118,84 +146,90 @@ export function Toolbar() {
 
         <div className="w-px h-6 bg-can-border mx-2" />
 
-        {/* View Mode Toggle */}
-        <div className="flex items-center bg-can-bg-tertiary rounded-md p-0.5">
-          <button
-            onClick={() => setViewMode("monitor")}
-            className={`px-3 py-1 text-sm rounded transition-colors ${
-              viewMode === "monitor"
-                ? "bg-can-accent-blue text-white"
-                : "text-can-text-secondary hover:text-can-text-primary"
-            }`}
-          >
-            Monitor
-          </button>
-          <button
-            onClick={() => setViewMode("trace")}
-            className={`px-3 py-1 text-sm rounded transition-colors ${
-              viewMode === "trace"
-                ? "bg-can-accent-blue text-white"
-                : "text-can-text-secondary hover:text-can-text-primary"
-            }`}
-          >
-            Trace
-          </button>
-        </div>
+          {/* View Mode Toggle - only visible in Monitor tab */}
+          {viewTab === "monitor" && (
+            <>
+              <div className="flex items-center bg-can-bg-tertiary rounded-md p-0.5">
+                <button
+                  onClick={() => setViewMode("monitor")}
+                  className={`px-3 py-1 text-sm rounded transition-colors ${
+                    viewMode === "monitor"
+                      ? "bg-can-accent-blue text-white"
+                      : "text-can-text-secondary hover:text-can-text-primary"
+                  }`}
+                >
+                  Monitor
+                </button>
+                <button
+                  onClick={() => setViewMode("trace")}
+                  className={`px-3 py-1 text-sm rounded transition-colors ${
+                    viewMode === "trace"
+                      ? "bg-can-accent-blue text-white"
+                      : "text-can-text-secondary hover:text-can-text-primary"
+                  }`}
+                >
+                  Trace
+                </button>
+              </div>
 
-        {/* Record Trace Button - only visible in trace mode */}
-        {viewMode === "trace" && (
-          <>
-            <div className="w-px h-6 bg-can-border mx-2" />
-            <button
-              onClick={toggleRecording}
-              className={`btn flex items-center gap-2 ${
-                isRecording ? "btn-danger" : "btn-success"
-              }`}
-              disabled={connectionStatus !== "connected"}
-            >
-              {isRecording ? (
+              {/* Record Trace Button - only visible in trace mode */}
+              {viewMode === "trace" && (
                 <>
-                  <StopIcon className="w-4 h-4" />
-                  Stop Recording
-                </>
-              ) : (
-                <>
-                  <RecordIcon className="w-4 h-4" />
-                  Record Trace
+                  <div className="w-px h-6 bg-can-border mx-2" />
+                  <button
+                    onClick={toggleRecording}
+                    className={`btn flex items-center gap-2 ${
+                      isRecording ? "btn-danger" : "btn-success"
+                    }`}
+                    disabled={connectionStatus !== "connected"}
+                  >
+                    {isRecording ? (
+                      <>
+                        <StopIcon className="w-4 h-4" />
+                        Stop Recording
+                      </>
+                    ) : (
+                      <>
+                        <RecordIcon className="w-4 h-4" />
+                        Record Trace
+                      </>
+                    )}
+                  </button>
                 </>
               )}
-            </button>
-          </>
-        )}
 
-        <div className="w-px h-6 bg-can-border mx-2" />
+              {/* Export and Project buttons - only visible in Monitor tab */}
+              <div className="w-px h-6 bg-can-border mx-2" />
 
-        <button
-          onClick={handleExport}
-          className="btn btn-secondary flex items-center gap-2"
-          disabled={traceMessages.length === 0}
-        >
-          <ArrowDownTrayIcon className="w-4 h-4" />
-          Export CSV
-        </button>
+              <button
+                onClick={handleExport}
+                className="btn btn-secondary flex items-center gap-2"
+                disabled={traceMessages.length === 0}
+              >
+                <ArrowDownTrayIcon className="w-4 h-4" />
+                Export CSV
+              </button>
 
-        <div className="w-px h-6 bg-can-border mx-2" />
+              <div className="w-px h-6 bg-can-border mx-2" />
 
-        <button
-          onClick={handleSaveProject}
-          className="btn btn-secondary flex items-center gap-2"
-        >
-          <ArrowDownTrayIcon className="w-4 h-4" />
-          Save Project
-        </button>
+              <button
+                onClick={handleSaveProject}
+                className="btn btn-secondary flex items-center gap-2"
+              >
+                <ArrowDownTrayIcon className="w-4 h-4" />
+                Save Project
+              </button>
 
-        <button
-          onClick={handleLoadProject}
-          className="btn btn-secondary flex items-center gap-2"
-        >
-          <ArrowDownTrayIcon className="w-4 h-4" />
-          Load Project
-        </button>
+              <button
+                onClick={handleLoadProject}
+                className="btn btn-secondary flex items-center gap-2"
+              >
+                <ArrowDownTrayIcon className="w-4 h-4" />
+                Load Project
+              </button>
+            </>
+          )}
+        </div>
       </div>
 
       {/* Right - Version */}

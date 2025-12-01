@@ -1,6 +1,7 @@
 import { useEffect } from "react";
 import { useCanStore } from "./stores/canStore";
 import { MessageViewer } from "./components/MessageViewer";
+import { PlotPanel } from "./components/PlotPanel";
 import { TransmitPanel } from "./components/TransmitPanel";
 import { Toolbar } from "./components/Toolbar";
 import { SignalInspector } from "./components/SignalInspector";
@@ -8,7 +9,7 @@ import { ChannelManager } from "./components/ChannelManager";
 import { FilterPanel } from "./components/FilterPanel";
 
 function App() {
-  const { initializeBackend } = useCanStore();
+  const { initializeBackend, viewTab } = useCanStore();
 
   useEffect(() => {
     initializeBackend();
@@ -21,24 +22,28 @@ function App() {
 
       {/* Main Content Area */}
       <div className="flex-1 flex overflow-hidden">
-        {/* Left Sidebar - Channels & Status */}
-        <aside className="w-72 flex flex-col border-r border-can-border bg-can-bg-secondary overflow-y-auto">
-          <ChannelManager />
-          <FilterPanel />
-        </aside>
+        {/* Left Sidebar - Channels & Status (only in Monitor tab) */}
+        {viewTab === "monitor" && (
+          <aside className="w-72 flex flex-col border-r border-can-border bg-can-bg-secondary overflow-y-auto">
+            <ChannelManager />
+            <FilterPanel />
+          </aside>
+        )}
 
-        {/* Center - Message Viewer */}
+        {/* Center - Message Viewer or Plot Panel */}
         <main className="flex-1 flex flex-col overflow-hidden">
-          <MessageViewer />
+          {viewTab === "monitor" ? <MessageViewer /> : <PlotPanel />}
         </main>
 
-        {/* Right Sidebar - Transmit Panel & Signal Inspector */}
-        <aside className="w-80 border-l border-can-border bg-can-bg-secondary flex flex-col overflow-hidden">
-          <TransmitPanel />
-          <div className="border-t border-can-border overflow-y-auto">
-            <SignalInspector />
-          </div>
-        </aside>
+        {/* Right Sidebar - Transmit Panel & Signal Inspector (only in Monitor tab) */}
+        {viewTab === "monitor" && (
+          <aside className="w-80 border-l border-can-border bg-can-bg-secondary flex flex-col overflow-hidden">
+            <TransmitPanel />
+            <div className="border-t border-can-border overflow-y-auto">
+              <SignalInspector />
+            </div>
+          </aside>
+        )}
       </div>
 
       {/* Bottom Status Bar */}
