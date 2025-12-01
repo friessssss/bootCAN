@@ -233,7 +233,7 @@ export function Toolbar() {
       </div>
 
       {/* Right - Version */}
-      <div className="text-xs text-can-text-muted">v0.1.0</div>
+          <div className="text-xs text-can-text-muted">v0.2.0</div>
     </header>
   );
 }
