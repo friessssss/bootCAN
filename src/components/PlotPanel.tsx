@@ -36,8 +36,6 @@ export function PlotPanel() {
     setPlotData,
     channels,
     loadTrace,
-    startPlayback,
-    traceMessages,
     playbackState,
     loadedTraceFile,
     loadedDbcFiles,
@@ -418,8 +416,8 @@ export function PlotPanel() {
         data.push(values);
       }
       
-      // Get channel name for label
-      const channelName = channels.find(c => c.id === signal.channelId)?.name || signal.channelId;
+      // Get channel name for label (not used currently but kept for future use)
+      // const channelName = channels.find(c => c.id === signal.channelId)?.name || signal.channelId;
       const idHex = `0x${signal.messageId.toString(16).toUpperCase().padStart(3, "0")}`;
       const label = `${signal.signalName} (${idHex})`;
       
@@ -430,13 +428,26 @@ export function PlotPanel() {
           points: { show: false },
           spanGaps: true, // Connect lines across null/missing values
           // Value formatter - v should never be null now since we forward-filled
-          value: (u, v) => {
+          value: (_u, v) => {
             return v == null ? "--" : v.toFixed(3);
           },
         });
     }
     
-    return { data, series };
+    // Convert data arrays to Float64Array for uPlot (required type)
+    const typedData: uPlot.AlignedData = [
+      new Float64Array(data[0] as number[]),
+      ...data.slice(1).map(arr => {
+        // Convert (number | null)[] to Float64Array, using NaN for null
+        const typed = new Float64Array(arr.length);
+        for (let i = 0; i < arr.length; i++) {
+          typed[i] = arr[i] ?? NaN;
+        }
+        return typed;
+      })
+    ];
+    
+    return { data: typedData, series };
   }, [selectedPlotSignals, plotData, plotTimeWindow, channels, isLoadingTrace]);
 
 
@@ -458,6 +469,7 @@ export function PlotPanel() {
     }
 
     // Create new chart if we have data
+    // chartData.data is already AlignedData (Float64Array[])
     if (data[0].length > 0 && series.length > 0) {
       const opts: uPlot.Options = {
         width: chartRef.current.clientWidth,
@@ -465,7 +477,7 @@ export function PlotPanel() {
         scales: {
           x: {
             time: false,
-            range: (u, dataMin, dataMax) => {
+            range: (_u, dataMin, dataMax) => {
               // Show all data if plotTimeWindow is -1, otherwise show rolling window
               if (plotTimeWindow < 0) {
                 return [dataMin, dataMax];
@@ -477,7 +489,7 @@ export function PlotPanel() {
           },
           y: {
             auto: true,
-            range: (u, dataMin, dataMax) => {
+            range: (_u, dataMin, dataMax) => {
               // Add some padding
               const padding = (dataMax - dataMin) * 0.1;
               return [dataMin - padding, dataMax + padding];
@@ -494,7 +506,7 @@ export function PlotPanel() {
             labelGap: 5,
             font: "11px system-ui",
             gap: 5,
-            values: (u, vals) => vals.map(v => {
+            values: (_u, vals) => vals.map(v => {
               // Format time values nicely
               if (Math.abs(v) < 0.001) return "0";
               if (Math.abs(v) < 1) return v.toFixed(3) + " s";
@@ -517,7 +529,7 @@ export function PlotPanel() {
         series: [
           {
             label: "Time",
-            value: (u, v) => {
+            value: (_u, v) => {
               if (v == null) return "--";
               // Format time values nicely in cursor
               if (Math.abs(v) < 0.001) return "0 s";
@@ -547,7 +559,8 @@ export function PlotPanel() {
       };
 
       try {
-        plotRef.current = new uPlot(opts, data, chartRef.current);
+        // data is already AlignedData (Float64Array[])
+        plotRef.current = new uPlot(opts, data as uPlot.AlignedData, chartRef.current);
       } catch (error) {
         console.error("Failed to create uPlot chart:", error);
       }
@@ -574,7 +587,8 @@ export function PlotPanel() {
         const { data } = chartData;
         if (data[0].length > 0) {
           try {
-            plotRef.current.setData(data, false);
+            // data is already AlignedData (Float64Array[])
+            plotRef.current.setData(data as uPlot.AlignedData, false);
           } catch (error) {
             console.error("Failed to update chart:", error);
           }
@@ -755,7 +769,7 @@ export function PlotPanel() {
         <div className="px-4 py-2 border-b border-can-border bg-can-bg-secondary">
           <div className="flex flex-wrap gap-2">
             {selectedPlotSignals.map((signal, idx) => {
-              const channelName = channels.find(c => c.id === signal.channelId)?.name || signal.channelId;
+              // const channelName = channels.find(c => c.id === signal.channelId)?.name || signal.channelId;
               const idHex = `0x${signal.messageId.toString(16).toUpperCase().padStart(3, "0")}`;
               const color = SIGNAL_COLORS[idx % SIGNAL_COLORS.length];
               

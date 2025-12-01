@@ -1,6 +1,6 @@
 import { useState, useEffect, useMemo } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { useCanStore, PlotSignal } from "../stores/canStore";
+import { useCanStore } from "../stores/canStore";
 import { MagnifyingGlassIcon, ChevronDownIcon, XMarkIcon } from "./icons";
 
 interface SignalInfo {
@@ -86,7 +86,7 @@ export function SignalSelector() {
         // Skip non-numeric signals (enumerated/boolean for MVP)
         if (signal.valueType === "unsigned" || signal.valueType === "signed" || 
             signal.valueType === "float" || signal.valueType === "double") {
-          const channelName = channels.find(c => c.id === msg.channelId)?.name || msg.channelId;
+          // const channelName = channels.find(c => c.id === msg.channelId)?.name || msg.channelId;
           const idHex = `0x${msg.messageId.toString(16).toUpperCase().padStart(3, "0")}`;
           const displayText = `${signal.name} (${msg.messageName} @ ${idHex})${signal.unit ? ` [${signal.unit}]` : ""}`;
           

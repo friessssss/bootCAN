@@ -13,7 +13,7 @@ interface DecodedSignal {
 }
 
 export function MessageViewer() {
-  const { traceMessages, monitorMessages, viewMode, idFilter, setIdFilter, isPaused, getDisplayMessages, loadedDbcFiles } = useCanStore();
+  const { traceMessages, monitorMessages, viewMode, idFilter, setIdFilter, isPaused, loadedDbcFiles } = useCanStore();
   
   // Get messages based on current view mode
   // Optimize: only recalculate when relevant data changes based on view mode

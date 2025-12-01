@@ -395,7 +395,7 @@ export const useCanStore = create<CanState>((set, get) => ({
 
                   set({ plotData: newPlotData });
                 })
-                .catch((error) => {
+                .catch((_error) => {
                   // Failed to decode signals, skip this message
                 });
             }
