@@ -52,19 +52,23 @@ export function SignalSelector() {
     fetchSignals();
   }, []);
 
-  // Get unique channel IDs from all signals
+  // Get unique channels from all signals, using channel names for display
   const availableChannels = useMemo(() => {
-    const channelSet = new Set<string>();
+    const channelMap = new Map<string, { id: string; name: string }>();
     for (const msg of allSignals) {
-      channelSet.add(msg.channelId);
+      if (!channelMap.has(msg.channelId)) {
+        const channelName = channels.find(c => c.id === msg.channelId)?.name || msg.channelId;
+        channelMap.set(msg.channelId, { id: msg.channelId, name: channelName });
+      }
     }
-    return Array.from(channelSet).sort();
-  }, [allSignals]);
+    // Sort by channel name for display
+    return Array.from(channelMap.values()).sort((a, b) => a.name.localeCompare(b.name));
+  }, [allSignals, channels]);
 
   // Initialize selected channels to all channels when signals are first loaded
   useEffect(() => {
     if (availableChannels.length > 0 && selectedChannels.size === 0) {
-      setSelectedChannels(new Set(availableChannels));
+      setSelectedChannels(new Set(availableChannels.map(c => c.id)));
     }
   }, [availableChannels]);
 
@@ -72,11 +76,11 @@ export function SignalSelector() {
   const signalOptions = useMemo(() => {
     const options: SignalOption[] = [];
     
-    for (const msg of allSignals) {
-      // Filter by selected channels
-      if (selectedChannels.size > 0 && !selectedChannels.has(msg.channelId)) {
-        continue;
-      }
+      for (const msg of allSignals) {
+        // Filter by selected channels (using channel IDs internally)
+        if (selectedChannels.size > 0 && !selectedChannels.has(msg.channelId)) {
+          continue;
+        }
 
       for (const signal of msg.signals) {
         // Skip non-numeric signals (enumerated/boolean for MVP)
@@ -211,22 +215,21 @@ export function SignalSelector() {
               <div className="p-2 border-b border-can-border">
                 <div className="text-xs text-can-text-secondary mb-1.5">Filter by Channel:</div>
                 <div className="flex flex-wrap gap-2">
-                  {availableChannels.map((channelId) => {
-                    const channelName = channels.find(c => c.id === channelId)?.name || channelId;
-                    const isSelected = selectedChannels.has(channelId);
+                  {availableChannels.map((channel) => {
+                    const isSelected = selectedChannels.has(channel.id);
                     return (
                       <label
-                        key={channelId}
+                        key={channel.id}
                         className="flex items-center gap-1.5 px-2 py-1 bg-can-bg-tertiary rounded text-xs cursor-pointer hover:bg-can-bg-hover transition-colors"
                       >
                         <input
                           type="checkbox"
                           checked={isSelected}
-                          onChange={() => handleToggleChannel(channelId)}
+                          onChange={() => handleToggleChannel(channel.id)}
                           className="w-3 h-3 rounded border-can-border text-can-accent-blue focus:ring-can-accent-blue"
                           onClick={(e) => e.stopPropagation()}
                         />
-                        <span className="text-can-text-primary">{channelName}</span>
+                        <span className="text-can-text-primary">{channel.name}</span>
                       </label>
                     );
                   })}

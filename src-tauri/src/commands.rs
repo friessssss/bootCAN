@@ -719,14 +719,41 @@ pub async fn stop_logging(state: State<'_, AppState>) -> Result<(), String> {
 #[tauri::command]
 pub async fn load_trace(
     state: State<'_, AppState>,
+    app: AppHandle,
     file_path: String,
-    bus_to_channel_map: Option<std::collections::HashMap<u8, String>>,
+    bus_to_channel_map: Option<std::collections::HashMap<String, String>>,
+    channel_name_to_id_map: Option<std::collections::HashMap<String, String>>,
 ) -> Result<usize, String> {
     // Build bus-to-channel mapping
     // If provided by frontend, use it; otherwise build from DBC databases
     let bus_to_channel = if let Some(map) = bus_to_channel_map {
-        log::info!("Using provided bus-to-channel mapping: {:?}", map);
-        Some(map)
+        log::info!("Using provided bus-to-channel mapping (names): {:?}", map);
+        log::info!("Channel name-to-ID mapping: {:?}", channel_name_to_id_map);
+        
+        // Convert string keys to u8 and resolve channel names to IDs
+        let mut resolved_map = std::collections::HashMap::new();
+        for (bus_num_str, channel_name) in map.iter() {
+            // Parse bus number from string key
+            let bus_num = bus_num_str.parse::<u8>()
+                .map_err(|e| format!("Invalid bus number '{}': {}", bus_num_str, e))?;
+            
+            // If channel names are provided, resolve them to channel IDs
+            if let Some(ref name_to_id) = channel_name_to_id_map {
+                if let Some(channel_id) = name_to_id.get(channel_name) {
+                    resolved_map.insert(bus_num, channel_id.clone());
+                    log::info!("Resolved bus {} -> channel name '{}' -> channel ID '{}'", bus_num, channel_name, channel_id);
+                } else {
+                    log::warn!("Channel name '{}' not found in name-to-ID mapping, using name as-is", channel_name);
+                    resolved_map.insert(bus_num, channel_name.clone());
+                }
+            } else {
+                // No name-to-ID mapping provided, assume values are already channel IDs
+                log::warn!("No name-to-ID mapping provided, using channel name '{}' as channel ID", channel_name);
+                resolved_map.insert(bus_num, channel_name.clone());
+            }
+        }
+        log::info!("Final resolved mapping: {:?}", resolved_map);
+        Some(resolved_map)
     } else {
         // Build bus-to-channel mapping from DBC database channel IDs
         // This ensures trace frames use the same channel IDs that signals are selected with
@@ -765,10 +792,32 @@ pub async fn load_trace(
         }
     };
 
+    log::info!("Passing bus-to-channel mapping to trace player: {:?}", bus_to_channel);
+    
+    // Create progress callback to emit events
+    let app_clone = app.clone();
+    let progress_callback: Option<Box<dyn Fn(usize) + Send + Sync>> = Some(Box::new(move |line_num| {
+        let _ = app_clone.emit("trace-load-progress", line_num);
+    }));
+    
     let count = {
         let mut player = state.trace_player.write().await;
-        player.load_file(PathBuf::from(file_path), bus_to_channel).await?
-    };
+        let result = player.load_file(PathBuf::from(file_path), bus_to_channel, progress_callback).await;
+        match result {
+            Ok(c) => {
+                log::info!("Successfully loaded {} frames from trace file", c);
+                Ok(c)
+            }
+            Err(e) => {
+                log::error!("Failed to load trace file: {}", e);
+                Err(e)
+            }
+        }
+    }?;
+    
+    // Emit completion event
+    let _ = app.emit("trace-load-complete", count);
+    
     Ok(count)
 }
 
@@ -910,6 +959,43 @@ pub async fn decode_message(
     } else {
         Ok(vec![])
     }
+}
+
+/// Batch decode multiple messages (for performance with large trace files)
+#[derive(serde::Deserialize)]
+pub struct DecodeRequest {
+    channel_id: String,
+    message_id: u32,
+    data: Vec<u8>,
+}
+
+#[tauri::command]
+pub async fn decode_messages_batch(
+    state: State<'_, AppState>,
+    requests: Vec<DecodeRequest>,
+) -> Result<Vec<Vec<DecodedSignal>>, String> {
+    // Clone databases to avoid holding the lock during parallel processing
+    let databases: std::collections::HashMap<String, crate::core::dbc::DbcDatabase> = {
+        let db_guard = state.dbc_databases.read();
+        db_guard.clone()
+    };
+    
+    // Use rayon for parallel processing
+    // Rayon automatically uses all available CPU cores
+    use rayon::prelude::*;
+    
+    let results: Vec<Vec<DecodedSignal>> = requests
+        .par_iter()
+        .map(|req| {
+            if let Some(db) = databases.get(&req.channel_id) {
+                db.decode_message(req.message_id, &req.data)
+            } else {
+                vec![]
+            }
+        })
+        .collect();
+    
+    Ok(results)
 }
 
 /// Get message information from DBC

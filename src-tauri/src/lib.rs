@@ -67,6 +67,7 @@ pub fn run() {
             get_playback_state,
             load_dbc,
             decode_message,
+            decode_messages_batch,
             get_message_info,
             get_all_signals,
             set_advanced_filter,

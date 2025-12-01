@@ -167,7 +167,7 @@ interface CanState {
   stopLogging: () => Promise<void>;
   
   // Trace playback actions
-  loadTrace: (filePath: string) => Promise<void>;
+  loadTrace: (filePath: string) => Promise<number>;
   startPlayback: () => Promise<void>;
   stopPlayback: () => Promise<void>;
   pausePlayback: () => Promise<void>;
@@ -255,7 +255,7 @@ export const useCanStore = create<CanState>((set, get) => ({
   selectedPlotSignals: [],
   plotData: new Map<string, PlotDataPoint[]>(),
   isPlotPaused: false,
-  plotTimeWindow: 10, // seconds
+  plotTimeWindow: -1, // -1 = "All", otherwise seconds
   plotMaxDataPoints: 5000,
 
   // Initialize backend and set up event listeners
@@ -343,8 +343,10 @@ export const useCanStore = create<CanState>((set, get) => ({
         });
 
         // Decode signals for plot if not paused and signals are selected
+        // Skip real-time updates during trace playback (data is loaded all at once, not incrementally)
         const currentState = get();
-        if (!currentState.isPlotPaused && currentState.selectedPlotSignals.length > 0) {
+        
+        if (!currentState.isPlotPaused && currentState.selectedPlotSignals.length > 0 && !isTracePlayback) {
           // Find signals that match this message
           const matchingSignals = currentState.selectedPlotSignals.filter(
             (sig) => sig.channelId === newFrame.channel && sig.messageId === newFrame.id
@@ -352,7 +354,7 @@ export const useCanStore = create<CanState>((set, get) => ({
 
           if (matchingSignals.length > 0) {
             if (!currentState.loadedDbcFiles.has(newFrame.channel)) {
-              console.debug(`Plot: No DBC loaded for channel ${newFrame.channel}, message 0x${newFrame.id.toString(16)}`);
+              // No DBC loaded for this channel, skip
             } else {
               // Decode all signals for this message
               invoke<Array<{ name: string; physicalValue: number }>>("decode_message", {
@@ -387,36 +389,18 @@ export const useCanStore = create<CanState>((set, get) => ({
                       }
 
                       newPlotData.set(key, dataPoints);
-                    } else {
-                      console.debug(`Plot: Signal ${signal.signalName} not found in decoded signals for message 0x${newFrame.id.toString(16)}`);
                     }
+                    // Signal not found in decoded signals, skip
                   }
 
                   set({ plotData: newPlotData });
                 })
                 .catch((error) => {
-                  console.debug("Failed to decode signals for plot:", error, {
-                    channel: newFrame.channel,
-                    messageId: newFrame.id,
-                    selectedSignals: matchingSignals.map(s => s.signalName),
-                  });
+                  // Failed to decode signals, skip this message
                 });
             }
           } else {
-            // Debug: log when we have selected signals but they don't match
-            if (currentState.selectedPlotSignals.length > 0) {
-              console.debug(`Plot: Message 0x${newFrame.id.toString(16)} on channel ${newFrame.channel} doesn't match selected signals`, {
-                selectedSignals: currentState.selectedPlotSignals.map(s => ({
-                  channel: s.channelId,
-                  message: `0x${s.messageId.toString(16)}`,
-                  signal: s.signalName,
-                })),
-                receivedMessage: {
-                  channel: newFrame.channel,
-                  message: `0x${newFrame.id.toString(16)}`,
-                },
-              });
-            }
+            // Message doesn't match any selected signals, skip
           }
         }
       });
@@ -676,34 +660,53 @@ export const useCanStore = create<CanState>((set, get) => ({
     try {
       // Build bus-to-channel mapping based on channel numbers
       // Extract channel number from channel name (e.g., "Channel 3" -> bus 3)
+      // Use channel NAMES (not IDs) for the mapping as requested
       const state = get();
-      const busToChannelMap = new Map<number, string>();
+      const busToChannelNameMap = new Map<number, string>();
+      const channelNameToIdMap = new Map<string, string>();
       
       for (const channel of state.channels) {
+        // Store name -> ID mapping for backend resolution
+        channelNameToIdMap.set(channel.name, channel.id);
+        
         // Extract number from channel name (e.g., "Channel 3" -> 3)
         const match = channel.name.match(/\d+/);
         if (match) {
           const busNum = parseInt(match[0], 10);
           if (busNum > 0 && busNum <= 255) {
-            // Only map if this channel has a DBC file loaded
-            if (state.loadedDbcFiles.has(channel.id)) {
-              busToChannelMap.set(busNum, channel.id);
-              console.log(`Mapping bus ${busNum} -> channel ${channel.id} (${channel.name})`);
-            }
+            // Map bus number to channel NAME (not ID)
+            busToChannelNameMap.set(busNum, channel.name);
           }
         }
       }
       
-      // Convert Map to object for Tauri
-      const mappingObj: Record<string, string> = {};
-      busToChannelMap.forEach((channelId, busNum) => {
-        mappingObj[busNum.toString()] = channelId;
+      // Convert Maps to objects for Tauri
+      const busToNameObj: Record<string, string> = {};
+      busToChannelNameMap.forEach((channelName, busNum) => {
+        busToNameObj[busNum.toString()] = channelName;
       });
       
-      const count = await invoke<number>("load_trace", { 
-        filePath,
-        busToChannelMap: Object.keys(mappingObj).length > 0 ? mappingObj : undefined
+      const nameToIdObj: Record<string, string> = {};
+      channelNameToIdMap.forEach((channelId, channelName) => {
+        nameToIdObj[channelName] = channelId;
       });
+      
+      let count: number;
+      try {
+        count = await invoke<number>("load_trace", { 
+          filePath,
+          busToChannelMap: Object.keys(busToNameObj).length > 0 ? busToNameObj : undefined,
+          channelNameToIdMap: Object.keys(nameToIdObj).length > 0 ? nameToIdObj : undefined
+        });
+        // Trace loaded
+      } catch (error) {
+        console.error("Failed to invoke load_trace:", error);
+        throw error;
+      }
+      
+      if (count === undefined || count === null || isNaN(count)) {
+        throw new Error(`load_trace returned invalid count: ${count}`);
+      }
       
       // Load all frames directly into traceMessages (fast, bypasses event listener)
       const allFrames = await invoke<CanFrame[]>("get_trace_frames");
@@ -719,8 +722,10 @@ export const useCanStore = create<CanState>((set, get) => ({
         loadedTraceFile: filePath, 
         playbackFrameCount: count, 
         playbackCurrentIndex: 0,
-        traceMessages: traceFrames // Load directly into trace tab, not monitor
+        traceMessages: traceFrames, // Load directly into trace tab, not monitor
       });
+      
+      return count;
     } catch (error) {
       console.error("Failed to load trace:", error);
       throw error;

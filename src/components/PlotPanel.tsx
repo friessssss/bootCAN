@@ -6,6 +6,7 @@ import { SignalSelector } from "./SignalSelector";
 import { PauseIcon, PlayIcon, TrashIcon, XMarkIcon, FolderOpenIcon } from "./icons";
 import { open } from "@tauri-apps/plugin-dialog";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 
 // Color palette for signal lines
 const SIGNAL_COLORS = [
@@ -36,6 +37,7 @@ export function PlotPanel() {
     channels,
     loadTrace,
     startPlayback,
+    traceMessages,
     playbackState,
     loadedTraceFile,
     loadedDbcFiles,
@@ -46,6 +48,8 @@ export function PlotPanel() {
   const [updateTimer, setUpdateTimer] = useState<number | null>(null);
   const [isLoadingTrace, setIsLoadingTrace] = useState(false);
   const [loadingProgress, setLoadingProgress] = useState({ current: 0, total: 0 });
+  const [isLoadingFile, setIsLoadingFile] = useState(false);
+  const [fileLoadProgress, setFileLoadProgress] = useState(0);
   const traceStartTimeRef = useRef<number | null>(null); // Track trace start time for relative display
 
   const handleImportTrace = async () => {
@@ -61,90 +65,199 @@ export function PlotPanel() {
       });
 
       if (filePath && typeof filePath === "string") {
-        console.log("Importing trace file:", filePath);
         // Reset trace start time when loading a new trace
         traceStartTimeRef.current = null;
-        const frameCount = await loadTrace(filePath);
-        console.log(`Loaded ${frameCount} frames from trace file`);
+        setIsLoadingFile(true);
+        setFileLoadProgress(0);
+        
+        // Set up progress listener for file loading
+        const unlistenProgress = await listen<number>("trace-load-progress", (event) => {
+          setFileLoadProgress(event.payload);
+        });
+        
+        let unlistenComplete: (() => void) | null = null;
+        unlistenComplete = await listen<number>("trace-load-complete", async () => {
+          if (unlistenProgress) unlistenProgress();
+          if (unlistenComplete) unlistenComplete();
+          setIsLoadingFile(false);
+          setFileLoadProgress(0);
+        });
+        
+        try {
+          const frameCount = await loadTrace(filePath);
+          // Trace file loaded - frames are already normalized and stored in traceMessages
+          
+          if (frameCount === undefined || frameCount === null) {
+            console.error("loadTrace returned undefined/null. Check backend logs.");
+            return;
+          }
 
-        // Immediately decode all signals for selected signals and populate plot data
-        if (selectedPlotSignals.length > 0) {
-          console.log("Decoding all signals from trace file...");
+          // Immediately decode all signals for selected signals and populate plot data
+          if (selectedPlotSignals.length === 0) {
+            console.warn("No signals selected for plotting. Please add signals first.");
+            return;
+          }
+          
+          // Decoding signals
           setIsLoadingTrace(true);
           setLoadingProgress({ current: 0, total: 0 });
 
           try {
-            const allFrames = await invoke<CanFrame[]>("get_trace_frames");
-            console.log(`Got ${allFrames.length} frames from trace`);
+            // Use frames from store (already normalized) instead of calling get_trace_frames again
+            // This avoids the IPC overhead and duplicate normalization
+            // Get fresh from store after loadTrace completes
+            const allFrames = useCanStore.getState().traceMessages;
+            // Got frames from trace
+            
+            if (allFrames.length === 0) {
+              console.error("No frames loaded from trace file. Check bus-to-channel mapping.");
+              setIsLoadingTrace(false);
+              return;
+            }
             
             // Store the first timestamp as the trace start time (for relative time display)
-            if (allFrames.length > 0) {
-              traceStartTimeRef.current = allFrames[0].timestamp;
-            }
+            // Note: allFrames from loadTrace are already normalized (first frame = 0)
+            // So traceStartTimeRef should be 0 for trace files
+            traceStartTimeRef.current = 0;
             
             setLoadingProgress({ current: 0, total: allFrames.length });
 
-            // Decode signals for all matching frames
+            // Decode signals for all matching frames using batch processing
             const newPlotData = new Map<string, Array<{ time: number; value: number }>>();
+            let decodedCount = 0;
+            let skippedCount = 0;
 
-            // Process in batches to avoid blocking
-            const batchSize = 1000;
-            for (let i = 0; i < allFrames.length; i += batchSize) {
-              const batch = allFrames.slice(i, i + batchSize);
+            // Pre-compute lookup structures for O(1) access
+            const signalKeyMap = new Map<string, Set<string>>(); // channelId -> Set<messageId>
+            const signalNameMap = new Map<string, Set<string>>(); // `${channelId}-${messageId}` -> Set<signalName>
+            const signalKeys = new Set<string>(); // All signal keys for quick lookup
+            
+            for (const sig of selectedPlotSignals) {
+              if (!loadedDbcFiles.has(sig.channelId)) continue;
               
-              for (const frame of batch) {
-                // Find matching signals
-                const matchingSignals = selectedPlotSignals.filter(
-                  (sig) => sig.channelId === frame.channel && sig.messageId === frame.id
-                );
-
-                if (matchingSignals.length > 0 && loadedDbcFiles.has(frame.channel)) {
-                  try {
-                    const decodedSignals = await invoke<Array<{ name: string; physicalValue: number }>>("decode_message", {
-                      channelId: frame.channel,
-                      messageId: frame.id,
-                      data: frame.data,
-                    });
-
-                    // Update data for each matching signal
-                    for (const signal of matchingSignals) {
-                      const decoded = decodedSignals.find((s) => s.name === signal.signalName);
-                      if (decoded) {
-                        const key = `${signal.channelId}-${signal.messageId}-${signal.signalName}`;
-                        if (!newPlotData.has(key)) {
-                          newPlotData.set(key, []);
-                        }
-                        // Normalize timestamp to be relative to trace start
-                        const relativeTime = traceStartTimeRef.current !== null 
-                          ? frame.timestamp - traceStartTimeRef.current 
-                          : frame.timestamp;
-                        newPlotData.get(key)!.push({ time: relativeTime, value: decoded.physicalValue });
-                      }
-                    }
-                  } catch (error) {
-                    // Silently skip decode errors
-                  }
-                }
+              const key = `${sig.channelId}-${sig.messageId}-${sig.signalName}`;
+              signalKeys.add(key);
+              
+              if (!signalKeyMap.has(sig.channelId)) {
+                signalKeyMap.set(sig.channelId, new Set());
               }
-
-              // Update progress after each batch
-              const processed = Math.min(i + batch.length, allFrames.length);
-              setLoadingProgress({ current: processed, total: allFrames.length });
+              signalKeyMap.get(sig.channelId)!.add(sig.messageId.toString());
+              
+              const msgKey = `${sig.channelId}-${sig.messageId}`;
+              if (!signalNameMap.has(msgKey)) {
+                signalNameMap.set(msgKey, new Set());
+              }
+              signalNameMap.get(msgKey)!.add(sig.signalName);
             }
 
+            // Filter frames that match selected signals and have DBC files loaded
+            const framesToDecode: Array<{ frame: CanFrame; signalNames: string[] }> = [];
+            for (const frame of allFrames) {
+              // Fast lookup: check if this channel/message combo has any selected signals
+              const channelMsgs = signalKeyMap.get(frame.channel);
+              if (channelMsgs && channelMsgs.has(frame.id.toString()) && loadedDbcFiles.has(frame.channel)) {
+                const msgKey = `${frame.channel}-${frame.id}`;
+                const signalNames = Array.from(signalNameMap.get(msgKey) || []);
+                if (signalNames.length > 0) {
+                  framesToDecode.push({ frame, signalNames });
+                } else {
+                  skippedCount++;
+                }
+              } else {
+                skippedCount++;
+              }
+            }
+
+            // Process in large batches for parallel decoding
+            // Use larger batches for better parallelization, but yield to UI periodically
+            const batchSize = 50000; // Larger batches = fewer IPC calls = better performance
+            for (let i = 0; i < framesToDecode.length; i += batchSize) {
+              const batch = framesToDecode.slice(i, i + batchSize);
+              
+              // Prepare batch decode request
+              const decodeRequests = batch.map(({ frame }) => ({
+                channel_id: frame.channel,
+                message_id: frame.id,
+                data: frame.data,
+              }));
+
+              try {
+                // Batch decode all frames in parallel (backend uses rayon)
+                const decodedResults = await invoke<Array<Array<{ name: string; physicalValue: number }>>>(
+                  "decode_messages_batch",
+                  { requests: decodeRequests }
+                );
+
+                // Process decoded results - optimized with pre-computed lookups
+                // Note: frames from trace files are already normalized (first frame = 0)
+                // So we can use timestamps directly
+                for (let j = 0; j < batch.length; j++) {
+                  const { frame, signalNames } = batch[j];
+                  const decodedSignals = decodedResults[j];
+                  
+                  // Create a map for O(1) signal lookup
+                  const decodedMap = new Map(decodedSignals.map(s => [s.name, s]));
+
+                  // Update data for each matching signal
+                  for (const signalName of signalNames) {
+                    const decoded = decodedMap.get(signalName);
+                    if (decoded) {
+                      const key = `${frame.channel}-${frame.id}-${signalName}`;
+                      if (!newPlotData.has(key)) {
+                        newPlotData.set(key, []);
+                      }
+                      // Timestamps are already normalized (relative to trace start, starting at 0)
+                      newPlotData.get(key)!.push({ time: frame.timestamp, value: decoded.physicalValue });
+                      decodedCount++;
+                    }
+                  }
+                }
+              } catch (error) {
+                skippedCount += batch.length;
+                console.error(`Failed to decode batch starting at index ${i}:`, error);
+              }
+
+              // Update progress after each batch (throttled to avoid UI blocking)
+              const processed = Math.min(i + batch.length, framesToDecode.length);
+              setLoadingProgress({ current: processed, total: framesToDecode.length });
+              
+              // Yield to UI every few batches to prevent blocking
+              if (i % (batchSize * 5) === 0) {
+                await new Promise(resolve => setTimeout(resolve, 0));
+              }
+            }
+            
+            // Decoding complete - now process and downsample data
             // Trim data points to max and time window (if time window is set)
+            // For very large datasets, downsample before storing to improve performance
             const timeWindow = plotTimeWindow;
             const maxPoints = plotMaxDataPoints;
+            const maxStoredPoints = 100000; // Limit stored points to prevent memory issues
+            // Frames are already normalized (starting at 0), so lastFrameTime is the duration
+            const lastFrameTime = allFrames.length > 0 ? allFrames[allFrames.length - 1].timestamp : 0;
+            const cutoffTime = timeWindow > 0 ? lastFrameTime - timeWindow : -Infinity;
             
+            // Optimize: process all signals in one pass
             for (const [key, dataPoints] of newPlotData.entries()) {
               let filtered = dataPoints;
+              
               // Only filter by time window if it's positive (not "All")
-              if (timeWindow > 0) {
-                const currentTime = allFrames.length > 0 ? allFrames[allFrames.length - 1].timestamp : 0;
-                const cutoffTime = currentTime - timeWindow;
-                filtered = dataPoints.filter((pt) => pt.time >= cutoffTime);
+              if (timeWindow > 0 && dataPoints.length > 0) {
+                // Use binary search for faster filtering on sorted data
+                const firstValidIdx = dataPoints.findIndex(pt => pt.time >= cutoffTime);
+                if (firstValidIdx > 0) {
+                  filtered = dataPoints.slice(firstValidIdx);
+                }
               }
-              // Always limit to max points for performance
+              
+              // Downsample if we have too many points (before applying maxPoints limit)
+              if (filtered.length > maxStoredPoints) {
+                // Simple downsampling: take every Nth point
+                const step = Math.ceil(filtered.length / maxStoredPoints);
+                filtered = filtered.filter((_, idx) => idx % step === 0 || idx === filtered.length - 1);
+              }
+              
+              // Always limit to max points for performance (this is the display limit)
               if (filtered.length > maxPoints) {
                 filtered = filtered.slice(-maxPoints);
               }
@@ -153,17 +266,26 @@ export function PlotPanel() {
 
             // Update plot data in store
             setPlotData(newPlotData);
-            console.log(`Decoded and plotted data for ${selectedPlotSignals.length} signals from ${allFrames.length} frames`);
+            // Plot data updated
+            
+            if (newPlotData.size === 0) {
+              console.error("No plot data was generated. Check that:");
+              console.error("1. Signals are selected and match message IDs in the trace");
+              console.error("2. DBC files are loaded on the correct channels");
+              console.error("3. Bus-to-channel mapping is correct (Channel 1 -> Bus 1, Channel 3 -> Bus 3)");
+            }
+          } catch (error) {
+            console.error("Error during signal decoding:", error);
           } finally {
             setIsLoadingTrace(false);
             setLoadingProgress({ current: 0, total: 0 });
           }
-        }
 
-        // Auto-start playback after loading (for real-time updates)
-        const currentState = playbackState;
-        if (currentState === "stopped") {
-          await startPlayback();
+        // Don't auto-start playback - we've already loaded all the data
+        // Playback would cause real-time updates which is slow for large traces
+        } catch (error) {
+          console.error("Failed to load trace file:", error);
+          alert(`Failed to load trace file: ${error}`);
         }
       }
     } catch (error) {
@@ -177,25 +299,11 @@ export function PlotPanel() {
       return { data: [[], []], series: [] };
     }
 
-    // Determine base time for normalization
-    let minTime = Infinity;
-    for (const signal of selectedPlotSignals) {
-      const key = `${signal.channelId}-${signal.messageId}-${signal.signalName}`;
-      const data = plotData.get(key) || [];
-      for (const point of data) {
-        if (point.time < minTime) {
-          minTime = point.time;
-        }
-      }
-    }
+    // Data is already normalized (timestamps start at 0 for trace files)
+    // For live data, timestamps are relative to connection start
+    // So we can use timestamps directly without further normalization
     
-    const baseTime = traceStartTimeRef.current !== null 
-      ? traceStartTimeRef.current 
-      : (minTime !== Infinity ? minTime : 0);
-    
-    const normalizeTime = (t: number) => t - baseTime;
-    
-    // Collect all unique timestamps from all signals first
+    // Collect all unique timestamps from all signals
     const allTimesSet = new Set<number>();
     
     for (const signal of selectedPlotSignals) {
@@ -203,8 +311,7 @@ export function PlotPanel() {
       const rawData = plotData.get(key) || [];
       
       for (const point of rawData) {
-        const normalizedTime = normalizeTime(point.time);
-        allTimesSet.add(normalizedTime);
+        allTimesSet.add(point.time);
       }
     }
     
@@ -215,10 +322,21 @@ export function PlotPanel() {
     // Create sorted unified time array
     let unifiedTimes = Array.from(allTimesSet).sort((a, b) => a - b);
     
-    // Filter by time window if needed
+    // Filter by time window if needed (only if plotTimeWindow > 0, not for "All")
     if (plotTimeWindow > 0 && unifiedTimes.length > 0) {
       const cutoffTime = unifiedTimes[unifiedTimes.length - 1] - plotTimeWindow;
       unifiedTimes = unifiedTimes.filter(t => t >= cutoffTime);
+    }
+    
+    // Downsample if we have too many points for performance
+    // uPlot can handle large datasets, but 1.7M points is excessive
+    // Note: Data should already be downsampled during loading, but we add a safety check here
+    const maxDisplayPoints = 50000; // Reasonable limit for smooth rendering
+    if (unifiedTimes.length > maxDisplayPoints) {
+      // Simple downsampling: take every Nth point, keeping first and last
+      const step = Math.ceil(unifiedTimes.length / maxDisplayPoints);
+      unifiedTimes = unifiedTimes.filter((_, idx) => idx % step === 0 || idx === unifiedTimes.length - 1);
+      // Downsampled for display
     }
     
     // Build data arrays: [time, ...signal values]
@@ -234,20 +352,29 @@ export function PlotPanel() {
         // Signal has no data - fill with nulls
         data.push(new Array(unifiedTimes.length).fill(null));
       } else {
-        // Normalize and sort this signal's data
-        const normalizedData = rawData
-          .map(p => ({ time: normalizeTime(p.time), value: p.value }))
+        // Sort this signal's data (timestamps are already normalized)
+        const sortedData = rawData
+          .map(p => ({ time: p.time, value: p.value }))
           .sort((a, b) => a.time - b.time);
         
-        // Filter by time window if needed
-        let filteredData = normalizedData;
-        if (plotTimeWindow > 0 && normalizedData.length > 0) {
-          const cutoffTime = normalizedData[normalizedData.length - 1].time - plotTimeWindow;
-          filteredData = normalizedData.filter(p => p.time >= cutoffTime);
+        // Filter by time window if needed (only if plotTimeWindow > 0, not for "All")
+        let filteredData = sortedData;
+        if (plotTimeWindow > 0 && sortedData.length > 0) {
+          const cutoffTime = sortedData[sortedData.length - 1].time - plotTimeWindow;
+          filteredData = sortedData.filter(p => p.time >= cutoffTime);
+        }
+        
+        // Downsample the signal data to match unifiedTimes if needed
+        // This ensures we don't have more points than unifiedTimes
+        let processedData = filteredData;
+        if (filteredData.length > unifiedTimes.length * 2) {
+          // Downsample by taking every Nth point
+          const step = Math.ceil(filteredData.length / unifiedTimes.length);
+          processedData = filteredData.filter((_, idx) => idx % step === 0 || idx === filteredData.length - 1);
         }
         
         // Create a map for quick lookup
-        const dataMap = new Map(filteredData.map(p => [p.time, p.value]));
+        const dataMap = new Map(processedData.map(p => [p.time, p.value]));
         
         // Build value array aligned with unified time array
         // Forward-fill null values with the last known value
@@ -255,7 +382,30 @@ export function PlotPanel() {
         let lastValue: number | null = null;
         
         for (const t of unifiedTimes) {
-          const value = dataMap.get(t);
+          // Try exact match first
+          let value = dataMap.get(t);
+          
+          // If no exact match, find nearest point (for downsampled data)
+          if (value === undefined && processedData.length > 0) {
+            // Binary search for nearest time
+            let left = 0;
+            let right = processedData.length - 1;
+            while (left < right) {
+              const mid = Math.floor((left + right) / 2);
+              if (processedData[mid].time < t) {
+                left = mid + 1;
+              } else {
+                right = mid;
+              }
+            }
+            // Use the closest point
+            if (left < processedData.length) {
+              const dist1 = Math.abs(processedData[left].time - t);
+              const dist2 = left > 0 ? Math.abs(processedData[left - 1].time - t) : Infinity;
+              value = dist1 < dist2 ? processedData[left].value : processedData[left - 1].value;
+            }
+          }
+          
           if (value !== undefined) {
             lastValue = value;
             values.push(value);
@@ -287,11 +437,16 @@ export function PlotPanel() {
     }
     
     return { data, series };
-  }, [selectedPlotSignals, plotData, plotTimeWindow, channels]);
+  }, [selectedPlotSignals, plotData, plotTimeWindow, channels, isLoadingTrace]);
 
 
   // Initialize/update uPlot chart
   useEffect(() => {
+    // Don't update chart while loading trace - wait until all data is loaded
+    if (isLoadingTrace) {
+      return;
+    }
+
     if (!chartRef.current) return;
 
     const { data, series } = chartData;
@@ -339,6 +494,14 @@ export function PlotPanel() {
             labelGap: 5,
             font: "11px system-ui",
             gap: 5,
+            values: (u, vals) => vals.map(v => {
+              // Format time values nicely
+              if (Math.abs(v) < 0.001) return "0";
+              if (Math.abs(v) < 1) return v.toFixed(3) + " s";
+              if (Math.abs(v) < 60) return v.toFixed(1) + " s";
+              if (Math.abs(v) < 3600) return (v / 60).toFixed(1) + " min";
+              return (v / 3600).toFixed(2) + " h";
+            }),
           },
           {
             stroke: "#6b7280",
@@ -354,7 +517,15 @@ export function PlotPanel() {
         series: [
           {
             label: "Time",
-            value: (u, v) => v == null ? "--" : v.toFixed(3) + " s",
+            value: (u, v) => {
+              if (v == null) return "--";
+              // Format time values nicely in cursor
+              if (Math.abs(v) < 0.001) return "0 s";
+              if (Math.abs(v) < 1) return v.toFixed(3) + " s";
+              if (Math.abs(v) < 60) return v.toFixed(1) + " s";
+              if (Math.abs(v) < 3600) return (v / 60).toFixed(1) + " min";
+              return (v / 3600).toFixed(2) + " h";
+            },
           },
           ...series,
         ],
@@ -522,7 +693,31 @@ export function PlotPanel() {
         </label>
       </div>
 
-      {/* Loading Progress Bar */}
+      {/* File Loading Progress Bar */}
+      {isLoadingFile && (
+        <div className="px-4 py-2 border-b border-can-border bg-can-bg-secondary">
+          <div className="flex items-center gap-3">
+            <div className="flex-1">
+              <div className="flex items-center justify-between mb-1">
+                <span className="text-xs text-can-text-primary font-medium">
+                  Loading trace file...
+                </span>
+                <span className="text-xs text-can-text-muted">
+                  {fileLoadProgress.toLocaleString()} lines parsed
+                </span>
+              </div>
+              <div className="w-full bg-can-bg-tertiary rounded-full h-2">
+                <div 
+                  className="bg-can-accent-blue h-2 rounded-full transition-all duration-300"
+                  style={{ width: fileLoadProgress > 0 ? `${Math.min(100, (fileLoadProgress / 1700000) * 100)}%` : '0%' }}
+                />
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Decoding Progress Bar */}
       {isLoadingTrace && (
         <div className="px-4 py-2 border-b border-can-border bg-can-bg-secondary">
           <div className="flex items-center gap-3">
