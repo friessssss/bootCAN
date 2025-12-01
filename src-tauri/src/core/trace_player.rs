@@ -104,7 +104,7 @@ impl TracePlayer {
                     }
                 }
                 TraceFormat::Trc => {
-                    if let Ok(mut frame) = Self::parse_trc_line(&line, start_time_days, &bus_to_channel) {
+                    if let Ok(frame) = Self::parse_trc_line(&line, start_time_days, &bus_to_channel) {
                         frames.push_back(frame);
                     }
                 }
@@ -408,11 +408,16 @@ mod tests {
 
     #[test]
     fn test_parse_trc_line() {
-        let line = "  1.234567 Rx 123 8 01 02 03 04 05 06 07 08";
-        let frame = TracePlayer::parse_trc_line(line).unwrap();
-        assert_eq!(frame.id, 0x123);
+        // TRC format: "       1        77.686 DT 3      0132 Rx -  8    C4 00 00 00 00 00 00 00"
+        // Format: Number, Time Offset [ms], Type, Bus, ID [hex], Direction, Reserved, DLC, Data...
+        let line = "       1        77.686 DT 3      0132 Rx -  8    C4 00 00 00 00 00 00 00";
+        let start_time_days = Some(45345.123456); // Example MS Basic Decimal Days
+        let bus_to_channel = &None; // No channel mapping for test
+        let frame = TracePlayer::parse_trc_line(line, start_time_days, bus_to_channel).unwrap();
+        assert_eq!(frame.id, 0x132);
         assert_eq!(frame.dlc, 8);
         assert_eq!(frame.direction, "rx");
+        assert_eq!(frame.channel, "channel_3"); // Default channel when no mapping
     }
 }
 
