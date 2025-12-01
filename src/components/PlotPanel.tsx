@@ -46,6 +46,7 @@ export function PlotPanel() {
   const [updateTimer, setUpdateTimer] = useState<number | null>(null);
   const [isLoadingTrace, setIsLoadingTrace] = useState(false);
   const [loadingProgress, setLoadingProgress] = useState({ current: 0, total: 0 });
+  const traceStartTimeRef = useRef<number | null>(null); // Track trace start time for relative display
 
   const handleImportTrace = async () => {
     try {
@@ -61,6 +62,8 @@ export function PlotPanel() {
 
       if (filePath && typeof filePath === "string") {
         console.log("Importing trace file:", filePath);
+        // Reset trace start time when loading a new trace
+        traceStartTimeRef.current = null;
         const frameCount = await loadTrace(filePath);
         console.log(`Loaded ${frameCount} frames from trace file`);
 
@@ -73,6 +76,12 @@ export function PlotPanel() {
           try {
             const allFrames = await invoke<CanFrame[]>("get_trace_frames");
             console.log(`Got ${allFrames.length} frames from trace`);
+            
+            // Store the first timestamp as the trace start time (for relative time display)
+            if (allFrames.length > 0) {
+              traceStartTimeRef.current = allFrames[0].timestamp;
+            }
+            
             setLoadingProgress({ current: 0, total: allFrames.length });
 
             // Decode signals for all matching frames
@@ -105,7 +114,11 @@ export function PlotPanel() {
                         if (!newPlotData.has(key)) {
                           newPlotData.set(key, []);
                         }
-                        newPlotData.get(key)!.push({ time: frame.timestamp, value: decoded.physicalValue });
+                        // Normalize timestamp to be relative to trace start
+                        const relativeTime = traceStartTimeRef.current !== null 
+                          ? frame.timestamp - traceStartTimeRef.current 
+                          : frame.timestamp;
+                        newPlotData.get(key)!.push({ time: relativeTime, value: decoded.physicalValue });
                       }
                     }
                   } catch (error) {
@@ -119,14 +132,19 @@ export function PlotPanel() {
               setLoadingProgress({ current: processed, total: allFrames.length });
             }
 
-            // Trim data points to max and time window
+            // Trim data points to max and time window (if time window is set)
             const timeWindow = plotTimeWindow;
             const maxPoints = plotMaxDataPoints;
-            const currentTime = allFrames.length > 0 ? allFrames[allFrames.length - 1].timestamp : 0;
-            const cutoffTime = currentTime - timeWindow;
-
+            
             for (const [key, dataPoints] of newPlotData.entries()) {
-              let filtered = dataPoints.filter((pt) => pt.time >= cutoffTime);
+              let filtered = dataPoints;
+              // Only filter by time window if it's positive (not "All")
+              if (timeWindow > 0) {
+                const currentTime = allFrames.length > 0 ? allFrames[allFrames.length - 1].timestamp : 0;
+                const cutoffTime = currentTime - timeWindow;
+                filtered = dataPoints.filter((pt) => pt.time >= cutoffTime);
+              }
+              // Always limit to max points for performance
               if (filtered.length > maxPoints) {
                 filtered = filtered.slice(-maxPoints);
               }
@@ -159,64 +177,118 @@ export function PlotPanel() {
       return { data: [[], []], series: [] };
     }
 
-    // Collect all unique timestamps
-    const timeSet = new Set<number>();
+    // Determine base time for normalization
+    let minTime = Infinity;
     for (const signal of selectedPlotSignals) {
       const key = `${signal.channelId}-${signal.messageId}-${signal.signalName}`;
       const data = plotData.get(key) || [];
       for (const point of data) {
-        timeSet.add(point.time);
+        if (point.time < minTime) {
+          minTime = point.time;
+        }
       }
     }
-
-    // Sort timestamps
-    const times = Array.from(timeSet).sort((a, b) => a - b);
     
-    // Filter by time window
-    if (times.length > 0) {
-      const cutoffTime = times[times.length - 1] - plotTimeWindow;
-      const filteredTimes = times.filter(t => t >= cutoffTime);
+    const baseTime = traceStartTimeRef.current !== null 
+      ? traceStartTimeRef.current 
+      : (minTime !== Infinity ? minTime : 0);
+    
+    const normalizeTime = (t: number) => t - baseTime;
+    
+    // Collect all unique timestamps from all signals first
+    const allTimesSet = new Set<number>();
+    
+    for (const signal of selectedPlotSignals) {
+      const key = `${signal.channelId}-${signal.messageId}-${signal.signalName}`;
+      const rawData = plotData.get(key) || [];
       
-      // Build data arrays: [time, ...signal values]
-      const data: (number | null)[][] = [filteredTimes];
+      for (const point of rawData) {
+        const normalizedTime = normalizeTime(point.time);
+        allTimesSet.add(normalizedTime);
+      }
+    }
+    
+    if (allTimesSet.size === 0) {
+      return { data: [[], []], series: [] };
+    }
+    
+    // Create sorted unified time array
+    let unifiedTimes = Array.from(allTimesSet).sort((a, b) => a - b);
+    
+    // Filter by time window if needed
+    if (plotTimeWindow > 0 && unifiedTimes.length > 0) {
+      const cutoffTime = unifiedTimes[unifiedTimes.length - 1] - plotTimeWindow;
+      unifiedTimes = unifiedTimes.filter(t => t >= cutoffTime);
+    }
+    
+    // Build data arrays: [time, ...signal values]
+    const data: (number | null)[][] = [unifiedTimes];
+    const series: uPlot.Series[] = [];
+    
+    for (let i = 0; i < selectedPlotSignals.length; i++) {
+      const signal = selectedPlotSignals[i];
+      const key = `${signal.channelId}-${signal.messageId}-${signal.signalName}`;
+      const rawData = plotData.get(key) || [];
       
-      // Build series config
-      const series: uPlot.Series[] = [];
-      
-      for (let i = 0; i < selectedPlotSignals.length; i++) {
-        const signal = selectedPlotSignals[i];
-        const key = `${signal.channelId}-${signal.messageId}-${signal.signalName}`;
-        const signalData = plotData.get(key) || [];
+      if (rawData.length === 0) {
+        // Signal has no data - fill with nulls
+        data.push(new Array(unifiedTimes.length).fill(null));
+      } else {
+        // Normalize and sort this signal's data
+        const normalizedData = rawData
+          .map(p => ({ time: normalizeTime(p.time), value: p.value }))
+          .sort((a, b) => a.time - b.time);
+        
+        // Filter by time window if needed
+        let filteredData = normalizedData;
+        if (plotTimeWindow > 0 && normalizedData.length > 0) {
+          const cutoffTime = normalizedData[normalizedData.length - 1].time - plotTimeWindow;
+          filteredData = normalizedData.filter(p => p.time >= cutoffTime);
+        }
         
         // Create a map for quick lookup
-        const dataMap = new Map(signalData.map(p => [p.time, p.value]));
+        const dataMap = new Map(filteredData.map(p => [p.time, p.value]));
         
-        // Build value array aligned with time array
-        const values: (number | null)[] = filteredTimes.map(t => {
+        // Build value array aligned with unified time array
+        // Forward-fill null values with the last known value
+        const values: (number | null)[] = [];
+        let lastValue: number | null = null;
+        
+        for (const t of unifiedTimes) {
           const value = dataMap.get(t);
-          return value !== undefined ? value : null;
-        });
+          if (value !== undefined) {
+            lastValue = value;
+            values.push(value);
+          } else {
+            // Use last known value if available, otherwise null
+            values.push(lastValue);
+          }
+        }
         
         data.push(values);
-        
-        // Get channel name for label
-        const channelName = channels.find(c => c.id === signal.channelId)?.name || signal.channelId;
-        const idHex = `0x${signal.messageId.toString(16).toUpperCase().padStart(3, "0")}`;
-        const label = `${signal.signalName} (${idHex})`;
-        
+      }
+      
+      // Get channel name for label
+      const channelName = channels.find(c => c.id === signal.channelId)?.name || signal.channelId;
+      const idHex = `0x${signal.messageId.toString(16).toUpperCase().padStart(3, "0")}`;
+      const label = `${signal.signalName} (${idHex})`;
+      
         series.push({
           label,
           stroke: SIGNAL_COLORS[i % SIGNAL_COLORS.length],
           width: 2,
           points: { show: false },
+          spanGaps: true, // Connect lines across null/missing values
+          // Value formatter - v should never be null now since we forward-filled
+          value: (u, v) => {
+            return v == null ? "--" : v.toFixed(3);
+          },
         });
-      }
-      
-      return { data, series };
     }
     
-    return { data: [[], []], series: [] };
+    return { data, series };
   }, [selectedPlotSignals, plotData, plotTimeWindow, channels]);
+
 
   // Initialize/update uPlot chart
   useEffect(() => {
@@ -239,7 +311,10 @@ export function PlotPanel() {
           x: {
             time: false,
             range: (u, dataMin, dataMax) => {
-              // Show rolling window
+              // Show all data if plotTimeWindow is -1, otherwise show rolling window
+              if (plotTimeWindow < 0) {
+                return [dataMin, dataMax];
+              }
               const maxTime = dataMax;
               const minTime = Math.max(dataMin, maxTime - plotTimeWindow);
               return [minTime, maxTime];
@@ -287,6 +362,12 @@ export function PlotPanel() {
           show: true,
           x: true,
           y: true,
+          lock: true, // Keep cursor visible when mouse stops moving
+          points: {
+            show: true, // Show data points on cursor
+            size: 4,
+          },
+          // uPlot automatically interpolates values between data points when focus.prox is not set
         },
         legend: {
           show: true,
@@ -309,6 +390,7 @@ export function PlotPanel() {
       }
     };
   }, [chartData, plotTimeWindow]);
+
 
   // Throttled chart update (10Hz = 100ms)
   useEffect(() => {
@@ -433,6 +515,9 @@ export function PlotPanel() {
             <option value={20}>20 s</option>
             <option value={30}>30 s</option>
             <option value={60}>60 s</option>
+            <option value={300}>5 min</option>
+            <option value={600}>10 min</option>
+            <option value={-1}>All</option>
           </select>
         </label>
       </div>
@@ -508,16 +593,16 @@ export function PlotPanel() {
       )}
 
       {/* Chart */}
-      <div className="flex-1 overflow-hidden p-4">
+      <div className="flex-1 flex flex-col overflow-hidden">
         {selectedPlotSignals.length === 0 ? (
-          <div className="h-full flex items-center justify-center text-can-text-muted">
+          <div className="flex-1 flex items-center justify-center text-can-text-muted">
             <div className="text-center">
               <p className="text-sm mb-2">No signals selected</p>
               <p className="text-xs">Use "Add Signal" to start plotting</p>
             </div>
           </div>
         ) : (
-          <div ref={chartRef} className="w-full h-full" />
+          <div ref={chartRef} className="flex-1 p-4" />
         )}
       </div>
     </div>
