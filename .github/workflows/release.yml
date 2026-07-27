@@ -1,0 +1,59 @@
+# Builds the macOS app and publishes a GitHub release whenever a v* tag is
+# pushed. Tags containing a hyphen (v0.3.0-alpha) are marked as pre-releases.
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  build-macos:
+    runs-on: macos-latest # Apple Silicon runner
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin
+
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Build and publish release
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tagName: ${{ github.ref_name }}
+          releaseName: "bootCAN ${{ github.ref_name }}"
+          prerelease: ${{ contains(github.ref_name, '-') }}
+          args: --target aarch64-apple-darwin
+          releaseBody: |
+            macOS (Apple Silicon) build of bootCAN — a PCAN Explorer-style CAN
+            bus tool: real PCAN-USB support via the MacCAN PCBUSB driver,
+            combined receive/transmit window with symbolic signal decoding,
+            Nets, signal-level transmit editing, filtering, tracing, and
+            signal plotting.
+
+            **PCAN-USB hardware support (optional):** install the MacCAN
+            PCBUSB library from https://mac-can.github.io/drivers/libPCBUSB/
+            (copy `libPCBUSB.dylib` to `/usr/local/lib/`). Without it the app
+            still runs with virtual CAN interfaces.
+
+            **Note:** builds are not code-signed yet. If macOS refuses to open
+            the app, clear the quarantine flag:
+            ```
+            xattr -cr /Applications/bootCAN.app
+            ```
