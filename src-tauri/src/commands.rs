@@ -1,25 +1,31 @@
 //! Tauri IPC commands for frontend-backend communication
 
 use crate::core::bus_stats::BusStats;
-use crate::core::channel::{ChannelConfig, ChannelState};
+use crate::core::channel::{Channel, ChannelConfig, ChannelState};
 use crate::core::message::{CanFrame, FramePayload};
 use crate::core::trace_logger::{TraceLogger, TraceLoggerConfig, TraceFormat};
 use crate::core::trace_player::PlaybackState;
 use crate::core::dbc::{DbcParser, SymParser, DecodedSignal};
 use crate::core::filter::FilterSet;
-use crate::hal::traits::{enumerate_interfaces, InterfaceInfo};
+use crate::hal::traits::{enumerate_interfaces, BusState, InterfaceInfo};
 use crate::AppState;
+use parking_lot::RwLock;
 use std::path::PathBuf;
+use std::sync::Arc;
 use tauri::{AppHandle, Emitter, State};
 use std::time::Duration;
 use serde::{Deserialize, Serialize};
 use std::fs;
+
+/// Maximum frames drained from a channel per receive-pump tick.
+const RX_BATCH_SIZE: usize = 2048;
 
 /// Bus statistics with channel ID for per-channel tracking
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ChannelBusStats {
     pub channel_id: String,
+    pub bus_state: BusState,
     #[serde(flatten)]
     pub stats: BusStats,
 }
@@ -30,11 +36,12 @@ pub async fn get_interfaces() -> Result<Vec<InterfaceInfo>, String> {
     Ok(enumerate_interfaces())
 }
 
-/// Connect to a CAN interface (legacy - uses interface_id as channel_id)
-#[tauri::command]
-pub async fn connect(
-    state: State<'_, AppState>,
-    app: AppHandle,
+/// Shared connect path: connects the channel, then starts its receive pump
+/// and statistics loops.
+async fn connect_channel_impl(
+    state: &State<'_, AppState>,
+    app: &AppHandle,
+    channel_id: String,
     interface_id: String,
     bitrate: u32,
 ) -> Result<(), String> {
@@ -44,120 +51,137 @@ pub async fn connect(
         listen_only: false,
     };
 
-    // Get or create the channel and store a clone
     let channel = {
         let mut manager = state.channel_manager.write();
-        let channel = manager.get_or_create_channel(&interface_id);
-        manager.set_active_channel(&interface_id);
+        let channel = manager.get_or_create_channel(&channel_id);
+        manager.set_active_channel(&channel_id);
         channel
     };
 
-    // Connect the channel
+    // Driver initialization can block for tens of milliseconds.
     {
-        let mut ch = channel.write();
-        let connect_result = tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(ch.connect(config))
-        });
-        connect_result?;
+        let channel = channel.clone();
+        tokio::task::spawn_blocking(move || channel.write().connect(config))
+            .await
+            .map_err(|e| e.to_string())??;
     }
 
-    // Start the receive loop
-    let channel_clone = channel.clone();
-    let app_clone = app.clone();
+    spawn_receive_pump(
+        channel.clone(),
+        app.clone(),
+        channel_id.clone(),
+        state.frame_batcher.clone(),
+    );
+    spawn_stats_loop(channel.clone(), app.clone(), channel_id.clone(), bitrate);
 
-    // Spawn receive loop using spawn_blocking to avoid Send issues
+    log::info!("Connected channel {} to {} at {} bps", channel_id, interface_id, bitrate);
+    Ok(())
+}
+
+/// Drains received frames from the channel and pushes them into the frame
+/// batcher. Ends when the channel leaves the Connected state or the
+/// interface fails.
+fn spawn_receive_pump(
+    channel: Arc<RwLock<Channel>>,
+    app: AppHandle,
+    channel_id: String,
+    batcher: crate::core::batcher::FrameBatcher,
+) {
     tokio::spawn(async move {
-        let mut interval = tokio::time::interval(Duration::from_millis(1));
-        
+        let mut interval = tokio::time::interval(Duration::from_millis(5));
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
         loop {
             interval.tick().await;
-            
-            // Check connection status and receive in a synchronous block
-            let result = tokio::task::spawn_blocking({
-                let channel = channel_clone.clone();
-                let app = app_clone.clone();
-                move || {
-                    let mut ch = channel.write();
-                    // Use the public receive method
-                    let receive_result = tokio::runtime::Handle::current().block_on(ch.receive());
-                    match receive_result {
-                        Ok(Some(frame)) => {
-                            // Frame was received and passed filter - emit to frontend
-                            if let Err(e) = app.emit("can-message", &frame) {
-                                log::error!("Failed to emit can-message event: {:?}", e);
-                            }
-                        }
-                        Ok(None) => {
-                            // No frame available or filtered out - continue
-                        }
-                        Err(e) => {
-                            log::error!("Receive error: {}", e);
-                        }
-                    }
-                    Ok::<(), String>(())
-                }
-            }).await;
-            
-            if let Err(e) = result {
-                log::error!("Error in receive loop: {:?}", e);
-                break;
-            }
-        }
-    });
 
-    // Start statistics update loop
-    let channel_stats = channel.clone();
-    let app_stats = app.clone();
-    let bitrate_for_stats = bitrate;
-    let channel_id_for_stats = interface_id.clone();
-    
+            let batch = {
+                let mut ch = channel.write();
+                if ch.state != ChannelState::Connected {
+                    break;
+                }
+                match ch.receive_batch(RX_BATCH_SIZE) {
+                    Ok(frames) => frames,
+                    Err(e) => {
+                        log::error!("Channel {} receive failed: {}", channel_id, e);
+                        let _ = ch.disconnect();
+                        let _ = app.emit(
+                            "channel-error",
+                            serde_json::json!({ "channelId": channel_id, "error": e }),
+                        );
+                        break;
+                    }
+                }
+            };
+
+            batcher.push_many(batch);
+        }
+
+        log::info!("Receive loop ended for channel {}", channel_id);
+    });
+}
+
+/// Emits `bus-stats` for the channel every 100 ms until it disconnects.
+fn spawn_stats_loop(
+    channel: Arc<RwLock<Channel>>,
+    app: AppHandle,
+    channel_id: String,
+    bitrate: u32,
+) {
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(Duration::from_millis(100));
-        let mut last_total_messages = 0u64;
+        let mut last_bits_total = 0u64;
         let mut last_update_time = std::time::Instant::now();
-        
+
         loop {
             interval.tick().await;
-            
+
             let result = {
-                let mut ch = channel_stats.write();
-                
+                let mut ch = channel.write();
+
                 if ch.state != ChannelState::Connected {
                     None
                 } else {
-                    // Calculate message rate for bus load
+                    // Bus load from the observed wire-bit rate
                     let now = std::time::Instant::now();
                     let elapsed = now.duration_since(last_update_time).as_secs_f64();
-                    
+
                     if elapsed > 0.0 {
-                        let total_messages = ch.stats.tx_count + ch.stats.rx_count;
-                        let message_delta = total_messages.saturating_sub(last_total_messages);
-                        let messages_per_second = message_delta as f64 / elapsed;
-                        
-                        // Update bus load
-                        ch.stats.update_bus_load(messages_per_second, bitrate_for_stats);
-                        
-                        last_total_messages = total_messages;
+                        let bits_delta = ch.stats.bits_total.saturating_sub(last_bits_total);
+                        let bits_per_second = bits_delta as f64 / elapsed;
+
+                        ch.stats.update_bus_load(bits_per_second, bitrate);
+
+                        last_bits_total = ch.stats.bits_total;
                         last_update_time = now;
                     }
-                    
+
                     Some(ChannelBusStats {
-                        channel_id: channel_id_for_stats.clone(),
+                        channel_id: channel_id.clone(),
+                        bus_state: ch.get_bus_state(),
                         stats: ch.stats.clone(),
                     })
                 }
             };
-            
+
             match result {
-                Some(channel_stats) => {
-                    let _ = app_stats.emit("bus-stats", channel_stats);
+                Some(stats) => {
+                    let _ = app.emit("bus-stats", stats);
                 }
                 None => break,
             }
         }
     });
+}
 
-    Ok(())
+/// Connect to a CAN interface (legacy - uses interface_id as channel_id)
+#[tauri::command]
+pub async fn connect(
+    state: State<'_, AppState>,
+    app: AppHandle,
+    interface_id: String,
+    bitrate: u32,
+) -> Result<(), String> {
+    connect_channel_impl(&state, &app, interface_id.clone(), interface_id, bitrate).await
 }
 
 /// Connect a specific channel by its ID
@@ -169,154 +193,7 @@ pub async fn connect_channel(
     interface_id: String,
     bitrate: u32,
 ) -> Result<(), String> {
-    let config = ChannelConfig {
-        interface_id: interface_id.clone(),
-        bitrate,
-        listen_only: false,
-    };
-
-    // Get or create the channel with the specified channel_id
-    let channel = {
-        let mut manager = state.channel_manager.write();
-        let channel = manager.get_or_create_channel(&channel_id);
-        manager.set_active_channel(&channel_id);
-        channel
-    };
-
-    // Connect - acquire lock, connect, release immediately
-    {
-        let mut ch = channel.write();
-        // For non-async connect, we need to block on the future
-        // Since virtual CAN is synchronous, this should work
-        let connect_result = tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(ch.connect(config))
-        });
-        connect_result?;
-    }
-
-    // Start the receive loop
-    let channel_clone = channel.clone();
-    let app_clone = app.clone();
-    let channel_id_clone = channel_id.clone();
-
-    // Spawn receive loop using spawn_blocking to avoid Send issues
-    tokio::spawn(async move {
-        let mut interval = tokio::time::interval(Duration::from_millis(1));
-        
-        loop {
-            interval.tick().await;
-            
-            // Check connection status and receive in a synchronous block
-            let result = tokio::task::spawn_blocking({
-                let channel = channel_clone.clone();
-                let app = app_clone.clone();
-                move || {
-                    let mut ch = channel.write();
-                    
-                    // Check if still connected
-                    if ch.state != ChannelState::Connected {
-                        return Ok::<bool, String>(false);
-                    }
-                    
-                    // Use the public receive method
-                    let rx_result = tokio::runtime::Handle::current()
-                        .block_on(ch.receive());
-                    
-                    match rx_result {
-                        Ok(Some(frame)) => {
-                            // Frame received and passed filter - emit to frontend
-                            if let Err(e) = app.emit("can-message", &frame) {
-                                log::error!("Failed to emit can-message event: {:?}", e);
-                            }
-                            Ok::<bool, String>(true)
-                        }
-                        Ok(None) => {
-                            // No frame available or filtered out - continue
-                            Ok::<bool, String>(true)
-                        }
-                        Err(e) => {
-                            log::error!("Receive error: {}", e);
-                            Ok::<bool, String>(true)
-                        }
-                    }
-                }
-            }).await;
-            
-            match result {
-                Ok(Ok(should_continue)) => {
-                    if !should_continue {
-                        break;
-                    }
-                }
-                Ok(Err(e)) => {
-                    log::error!("Receive error: {}", e);
-                }
-                Err(e) => {
-                    log::error!("Task error: {:?}", e);
-                    break;
-                }
-            }
-        }
-        
-        log::info!("Receive loop ended for channel {}", channel_id_clone);
-    });
-
-    log::info!("Connected channel {} to {} at {} bps", channel_id, interface_id, bitrate);
-    
-    // Start statistics update loop
-    let channel_stats = channel.clone();
-    let app_stats = app.clone();
-    let bitrate_for_stats = bitrate;
-    let channel_id_for_stats = channel_id.clone();
-    
-    tokio::spawn(async move {
-        let mut interval = tokio::time::interval(Duration::from_millis(100));
-        let mut last_total_messages = 0u64;
-        let mut last_update_time = std::time::Instant::now();
-        
-        loop {
-            interval.tick().await;
-            
-            let result = {
-                let mut ch = channel_stats.write();
-                
-                if ch.state != ChannelState::Connected {
-                    None
-                } else {
-                    // Calculate message rate for bus load
-                    let now = std::time::Instant::now();
-                    let elapsed = now.duration_since(last_update_time).as_secs_f64();
-                    
-                    if elapsed > 0.0 {
-                        let total_messages = ch.stats.tx_count + ch.stats.rx_count;
-                        let message_delta = total_messages.saturating_sub(last_total_messages);
-                        let messages_per_second = message_delta as f64 / elapsed;
-                        
-                        // Update bus load
-                        ch.stats.update_bus_load(messages_per_second, bitrate_for_stats);
-                        
-                        last_total_messages = total_messages;
-                        last_update_time = now;
-                    }
-                    
-                    Some(ChannelBusStats {
-                        channel_id: channel_id_for_stats.clone(),
-                        stats: ch.stats.clone(),
-                    })
-                }
-            };
-            
-            match result {
-                Some(channel_stats) => {
-                    let _ = app_stats.emit("bus-stats", channel_stats);
-                }
-                None => break,
-            }
-        }
-    });
-
-    log::info!("Connected to {} at {} bps", interface_id, bitrate);
-    Ok(())
+    connect_channel_impl(&state, &app, channel_id, interface_id, bitrate).await
 }
 
 /// Disconnect from the current CAN interface (legacy)
@@ -328,20 +205,15 @@ pub async fn disconnect(state: State<'_, AppState>) -> Result<(), String> {
     };
 
     if let Some(channel) = channel {
-        let channel_id = {
-            let ch = channel.read();
-            ch.id.clone()
-        };
-        
-        // Disconnect in a blocking context
-        tokio::task::spawn_blocking({
-            let channel = channel.clone();
-            move || {
-                let mut ch = channel.write();
-                tokio::runtime::Handle::current().block_on(ch.disconnect())
-            }
-        }).await.map_err(|e| e.to_string())??;
-        
+        // Disconnecting joins the driver's reader thread; do it off-loop.
+        let channel_id = tokio::task::spawn_blocking(move || {
+            let mut ch = channel.write();
+            let id = ch.id.clone();
+            ch.disconnect().map(|_| id)
+        })
+        .await
+        .map_err(|e| e.to_string())??;
+
         log::info!("Disconnected from {}", channel_id);
     }
 
@@ -360,15 +232,10 @@ pub async fn disconnect_channel(
     };
 
     if let Some(channel) = channel {
-        // Disconnect in a blocking context
-        tokio::task::spawn_blocking({
-            let channel = channel.clone();
-            move || {
-                let mut ch = channel.write();
-                tokio::runtime::Handle::current().block_on(ch.disconnect())
-            }
-        }).await.map_err(|e| e.to_string())??;
-        
+        tokio::task::spawn_blocking(move || channel.write().disconnect())
+            .await
+            .map_err(|e| e.to_string())??;
+
         log::info!("Disconnected channel {}", channel_id);
     }
 
@@ -379,10 +246,9 @@ pub async fn disconnect_channel(
 #[tauri::command]
 pub async fn send_message(
     state: State<'_, AppState>,
-    app: AppHandle,
     frame: FramePayload,
 ) -> Result<(), String> {
-    log::info!("send_message called with frame ID: 0x{:X}", frame.id);
+    log::debug!("send_message called with frame ID: 0x{:X}", frame.id);
     
     let channel = {
         let mut manager = state.channel_manager.write();
@@ -405,36 +271,28 @@ pub async fn send_message(
     // Create base frame
     let can_frame: CanFrame = frame.into();
 
-    // Send in a blocking context and get the frame with proper timestamp
-    let sent_frame = tokio::task::spawn_blocking({
-        let channel = channel.clone();
-        let frame = can_frame.clone();
-        move || {
-            let mut ch = channel.write();
-            
-            // Get timestamp AFTER acquiring write lock, right before send
-            let timestamp = ch.get_timestamp();
-            let channel_id = ch.id.clone();
-            
-            // Create the frame we'll emit with proper metadata
-            let mut tx_frame = frame.clone();
-            tx_frame.channel = channel_id;
-            tx_frame.timestamp = timestamp;
-            tx_frame.direction = "tx".to_string();
-            
-            // Send the frame
-            let result = tokio::runtime::Handle::current().block_on(ch.send(frame));
-            
-            result.map(|_| tx_frame)
-        }
-    }).await.map_err(|e| e.to_string())??;
+    // Sending is non-blocking (queues into the driver), so no offloading needed.
+    let sent_frame = {
+        let mut ch = channel.write();
 
-    log::info!("Frame sent successfully, emitting event with timestamp {}", sent_frame.timestamp);
+        // Get timestamp AFTER acquiring write lock, right before send
+        let timestamp = ch.get_timestamp();
+        let channel_id = ch.id.clone();
 
-    // Emit the sent frame to the frontend
-    if let Err(e) = app.emit("can-message", &sent_frame) {
-        log::error!("Failed to emit can-message event: {:?}", e);
-    }
+        // Create the frame we'll emit with proper metadata
+        let mut tx_frame = can_frame.clone();
+        tx_frame.channel = channel_id;
+        tx_frame.timestamp = timestamp;
+        tx_frame.direction = "tx".to_string();
+
+        ch.send(can_frame)?;
+        tx_frame
+    };
+
+    log::debug!("Frame sent, batching event with timestamp {}", sent_frame.timestamp);
+
+    // Queue the sent frame for the frontend
+    state.frame_batcher.push(sent_frame);
 
     Ok(())
 }
@@ -460,12 +318,11 @@ pub async fn get_bus_stats(state: State<'_, AppState>) -> Result<BusStats, Strin
 #[tauri::command]
 pub async fn start_periodic_transmit(
     state: State<'_, AppState>,
-    app: AppHandle,
     frame: FramePayload,
     interval_ms: u64,
 ) -> Result<String, String> {
     let job_id = uuid::Uuid::new_v4().to_string();
-    
+
     let channel = {
         let mut manager = state.channel_manager.write();
         // Use channel from frame if provided, otherwise use active channel
@@ -484,66 +341,62 @@ pub async fn start_periodic_transmit(
         }
     };
 
-    // Create cancellation channel
     let (cancel_tx, mut cancel_rx) = tokio::sync::watch::channel(false);
-    
-    // Store the cancellation sender
+    let shared_frame = Arc::new(RwLock::new(CanFrame::from(frame)));
+    let count = Arc::new(std::sync::atomic::AtomicU64::new(0));
+
     {
         let mut jobs = state.periodic_jobs.write();
-        jobs.insert(job_id.clone(), cancel_tx);
+        jobs.insert(
+            job_id.clone(),
+            crate::PeriodicJob {
+                cancel: cancel_tx,
+                frame: shared_frame.clone(),
+                count: count.clone(),
+            },
+        );
     }
 
-    let can_frame: CanFrame = frame.into();
     let job_id_clone = job_id.clone();
     let periodic_jobs = state.periodic_jobs.clone();
+    let batcher = state.frame_batcher.clone();
 
     // Spawn periodic transmit task
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(Duration::from_millis(interval_ms));
-        
+
         loop {
             tokio::select! {
                 _ = interval.tick() => {
-                    let result = tokio::task::spawn_blocking({
-                        let channel = channel.clone();
-                        let frame = can_frame.clone();
-                        move || {
-                            let mut ch = channel.write();
-                            
-                            if ch.state != ChannelState::Connected {
-                                return (false, None);
-                            }
-                            
-                            // Get timestamp right before send
-                            let timestamp = ch.get_timestamp();
-                            let channel_id = ch.id.clone();
-                            
-                            // Create TX frame with proper metadata
-                            let mut tx_frame = frame.clone();
-                            tx_frame.channel = channel_id;
-                            tx_frame.timestamp = timestamp;
-                            tx_frame.direction = "tx".to_string();
-                            
-                            let send_result = tokio::runtime::Handle::current()
-                                .block_on(ch.send(frame));
-                            
-                            match send_result {
-                                Ok(()) => (true, Some(tx_frame)),
-                                Err(_) => (true, None),
-                            }
+                    let maybe_frame = {
+                        let mut ch = channel.write();
+
+                        if ch.state != ChannelState::Connected {
+                            break;
                         }
-                    }).await;
-                    
-                    match result {
-                        Ok((should_continue, maybe_frame)) => {
-                            if !should_continue {
-                                break;
-                            }
-                            if let Some(tx_frame) = maybe_frame {
-                                let _ = app.emit("can-message", tx_frame);
-                            }
+
+                        // Re-read the shared frame each tick so live edits apply
+                        let frame_now = shared_frame.read().clone();
+
+                        // Get timestamp right before send
+                        let timestamp = ch.get_timestamp();
+                        let channel_id = ch.id.clone();
+
+                        // Create TX frame with proper metadata
+                        let mut tx_frame = frame_now.clone();
+                        tx_frame.channel = channel_id;
+                        tx_frame.timestamp = timestamp;
+                        tx_frame.direction = "tx".to_string();
+
+                        match ch.send(frame_now) {
+                            Ok(()) => Some(tx_frame),
+                            Err(_) => None,
                         }
-                        Err(_) => break,
+                    };
+
+                    if let Some(tx_frame) = maybe_frame {
+                        count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        batcher.push(tx_frame);
                     }
                 }
                 _ = cancel_rx.changed() => {
@@ -554,13 +407,13 @@ pub async fn start_periodic_transmit(
                 }
             }
         }
-        
+
         // Clean up job from tracker
         {
             let mut jobs = periodic_jobs.write();
             jobs.remove(&job_id_clone);
         }
-        
+
         log::info!("Periodic transmit job {} ended", job_id_clone);
     });
 
@@ -573,19 +426,46 @@ pub async fn stop_periodic_transmit(
     state: State<'_, AppState>,
     job_id: String,
 ) -> Result<(), String> {
-    let cancel_tx = {
-        let jobs = state.periodic_jobs.read();
-        jobs.get(&job_id).cloned()
-    };
-    
-    if let Some(tx) = cancel_tx {
-        let _ = tx.send(true);
+    let jobs = state.periodic_jobs.read();
+    if let Some(job) = jobs.get(&job_id) {
+        let _ = job.cancel.send(true);
         log::info!("Sent cancel signal to job {}", job_id);
     } else {
         log::warn!("Job {} not found", job_id);
     }
-    
+
     Ok(())
+}
+
+/// Update the frame of a running periodic transmit job in place.
+/// The new data applies on the job's next tick — no stop/restart glitch.
+/// (Changing the interval or target channel still requires a restart.)
+#[tauri::command]
+pub async fn update_periodic_transmit(
+    state: State<'_, AppState>,
+    job_id: String,
+    frame: FramePayload,
+) -> Result<(), String> {
+    let jobs = state.periodic_jobs.read();
+    let job = jobs
+        .get(&job_id)
+        .ok_or_else(|| format!("Job {} not found", job_id))?;
+    *job.frame.write() = CanFrame::from(frame);
+    Ok(())
+}
+
+/// Per-job transmit counts for all running periodic jobs.
+#[tauri::command]
+pub async fn get_periodic_tx_counts(
+    state: State<'_, AppState>,
+) -> Result<std::collections::HashMap<String, u64>, String> {
+    let jobs = state.periodic_jobs.read();
+    Ok(jobs
+        .iter()
+        .map(|(id, job)| {
+            (id.clone(), job.count.load(std::sync::atomic::Ordering::Relaxed))
+        })
+        .collect())
 }
 
 /// Set message filter (legacy simple filter)
@@ -651,7 +531,6 @@ pub async fn clear_messages(state: State<'_, AppState>) -> Result<(), String> {
 #[tauri::command]
 pub async fn start_logging(
     state: State<'_, AppState>,
-    app: AppHandle,
     file_path: String,
     format: String,
 ) -> Result<(), String> {
@@ -683,16 +562,22 @@ pub async fn start_logging(
         if let Some(channel) = channel {
             let mut rx = channel.read().subscribe();
             let sender_clone = sender.clone();
-            let app_clone = app.clone();
 
+            // Forward frames to the logger only; the receive pump already
+            // delivers them to the frontend via the frame batcher.
             tokio::spawn(async move {
-                while let Ok(frame) = rx.recv().await {
-                    // Send to logger
-                    if sender_clone.send(frame.clone()).is_err() {
-                        break;
+                loop {
+                    match rx.recv().await {
+                        Ok(frame) => {
+                            if sender_clone.send(frame).is_err() {
+                                break;
+                            }
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                            log::warn!("Trace logger lagged, {} frames skipped", n);
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                     }
-                    // Also emit to frontend
-                    let _ = app_clone.emit("can-message", frame);
                 }
             });
         }
@@ -825,16 +710,15 @@ pub async fn load_trace(
 #[tauri::command]
 pub async fn start_playback(
     state: State<'_, AppState>,
-    app: AppHandle,
 ) -> Result<(), String> {
     {
         let mut player = state.trace_player.write().await;
         player.start()?;
     }
 
-    // Start playback loop - just emit frames, don't send to hardware
+    // Start playback loop - frames go to the frontend only, not to hardware
     let player_clone = state.trace_player.clone();
-    let app_clone = app.clone();
+    let batcher = state.frame_batcher.clone();
 
     tokio::spawn(async move {
         loop {
@@ -849,13 +733,8 @@ pub async fn start_playback(
             // Wait for the delay
             tokio::time::sleep(delay).await;
 
-            // Emit to frontend (this is what the plot needs)
             // The frame already has the correct channel set from bus mapping
-            if let Err(e) = app_clone.emit("can-message", &frame) {
-                log::error!("Failed to emit can-message event: {:?}", e);
-            } else {
-                log::trace!("Emitted frame: ID=0x{:X} channel={} timestamp={}", frame.id, frame.channel, frame.timestamp);
-            }
+            batcher.push(frame);
         }
     });
 
@@ -963,6 +842,7 @@ pub async fn decode_message(
 
 /// Batch decode multiple messages (for performance with large trace files)
 #[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct DecodeRequest {
     channel_id: String,
     message_id: u32,
@@ -1009,7 +889,7 @@ pub async fn get_message_info(
         let databases = state.dbc_databases.read();
         databases.get(&channel_id).cloned()
     };
-    
+
     if let Some(db) = db {
         if let Some(message) = db.get_message(message_id) {
             Ok(Some(serde_json::to_value(message).map_err(|e| e.to_string())?))
@@ -1019,6 +899,80 @@ pub async fn get_message_info(
     } else {
         Ok(None)
     }
+}
+
+/// Get a message definition by symbolic name, together with the value tables
+/// its signals reference (for enum dropdowns in the transmit editor).
+#[tauri::command]
+pub async fn get_message_by_name(
+    state: State<'_, AppState>,
+    channel_id: String,
+    name: String,
+) -> Result<Option<serde_json::Value>, String> {
+    let databases = state.dbc_databases.read();
+    let Some(db) = databases.get(&channel_id) else {
+        return Ok(None);
+    };
+    let Some(message) = db.messages.values().find(|m| m.name == name) else {
+        return Ok(None);
+    };
+
+    let mut value_tables = serde_json::Map::new();
+    for signal in &message.signals {
+        if let Some(ref table_name) = signal.value_table {
+            if let Some(table) = db.value_tables.get(table_name) {
+                let entries: std::collections::HashMap<String, String> = table
+                    .values
+                    .iter()
+                    .map(|(raw, label)| (raw.to_string(), label.clone()))
+                    .collect();
+                value_tables.insert(
+                    table_name.clone(),
+                    serde_json::to_value(entries).map_err(|e| e.to_string())?,
+                );
+            }
+        }
+    }
+
+    Ok(Some(serde_json::json!({
+        "message": message,
+        "valueTables": value_tables,
+    })))
+}
+
+/// Bulk id -> symbolic name map for a channel's loaded symbol file
+#[tauri::command]
+pub async fn get_message_names(
+    state: State<'_, AppState>,
+    channel_id: String,
+) -> Result<std::collections::HashMap<u32, String>, String> {
+    let databases = state.dbc_databases.read();
+    Ok(databases
+        .get(&channel_id)
+        .map(|db| {
+            db.messages
+                .iter()
+                .map(|(id, m)| (*id, m.name.clone()))
+                .collect()
+        })
+        .unwrap_or_default())
+}
+
+/// Encode physical signal values into message payload bytes.
+/// `base` preserves bytes of signals not being edited.
+#[tauri::command]
+pub async fn encode_signals(
+    state: State<'_, AppState>,
+    channel_id: String,
+    message_id: u32,
+    values: std::collections::HashMap<String, f64>,
+    base: Option<Vec<u8>>,
+) -> Result<Vec<u8>, String> {
+    let databases = state.dbc_databases.read();
+    let db = databases
+        .get(&channel_id)
+        .ok_or_else(|| format!("No symbol file loaded for channel {}", channel_id))?;
+    db.encode_signals(message_id, &values, base)
 }
 
 /// Signal information for plotting
@@ -1085,15 +1039,18 @@ pub async fn get_all_signals(
     Ok(result)
 }
 
-/// Project file structures
+/// Project file structures (version 2.0)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct ProjectChannel {
+pub struct ProjectNet {
     pub id: String,
     pub name: String,
-    pub interface_id: Option<String>,
     pub bitrate: u32,
-    pub dbc_file: Option<String>,
+    /// Device binding is kept even when the device is unplugged; the UI shows
+    /// the net as unassigned/unplugged rather than losing the association.
+    pub assigned_device_id: Option<String>,
+    pub symbol_file_path: Option<String>,
+    pub comment: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1105,35 +1062,112 @@ pub struct ProjectFilter {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct ProjectTransmitJob {
+pub struct ProjectTransmitRow {
     pub id: String,
-    pub frame: FramePayload,
-    pub interval_ms: u64,
-    pub enabled: bool,
+    pub name: String,
+    #[serde(default)]
+    pub comment: String,
+    pub net_id: Option<String>,
+    pub can_id: u32,
+    pub is_extended: bool,
+    pub is_remote: bool,
+    pub dlc: u8,
+    pub data: Vec<u8>,
+    /// Cycle time in ms; 0 = manual-only.
+    pub cycle_ms: u64,
+    #[serde(default)]
+    pub signal_values: Option<std::collections::HashMap<String, f64>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProjectFile {
     pub version: String,
-    pub channels: Vec<ProjectChannel>,
+    pub nets: Vec<ProjectNet>,
     pub filters: Vec<ProjectFilter>,
-    pub transmit_jobs: Vec<ProjectTransmitJob>,
+    pub transmit_rows: Vec<ProjectTransmitRow>,
+}
+
+/// Version 1.0 shapes, accepted on load and migrated to 2.0.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ProjectChannelV1 {
+    id: String,
+    name: String,
+    interface_id: Option<String>,
+    bitrate: u32,
+    dbc_file: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ProjectTransmitJobV1 {
+    id: String,
+    frame: FramePayload,
+    interval_ms: u64,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ProjectFileV1 {
+    #[allow(dead_code)]
+    version: String,
+    channels: Vec<ProjectChannelV1>,
+    #[serde(default)]
+    filters: Vec<ProjectFilter>,
+    #[serde(default)]
+    transmit_jobs: Vec<ProjectTransmitJobV1>,
+}
+
+fn migrate_project_v1(v1: ProjectFileV1) -> ProjectFile {
+    ProjectFile {
+        version: "2.0".to_string(),
+        nets: v1
+            .channels
+            .into_iter()
+            .map(|ch| ProjectNet {
+                id: ch.id,
+                name: ch.name,
+                bitrate: ch.bitrate,
+                assigned_device_id: ch.interface_id,
+                symbol_file_path: ch.dbc_file,
+                comment: None,
+            })
+            .collect(),
+        filters: v1.filters,
+        transmit_rows: v1
+            .transmit_jobs
+            .into_iter()
+            .map(|job| ProjectTransmitRow {
+                id: job.id,
+                name: format!("0x{:X}", job.frame.id),
+                comment: String::new(),
+                net_id: job.frame.channel.clone(),
+                can_id: job.frame.id,
+                is_extended: job.frame.is_extended,
+                is_remote: job.frame.is_remote,
+                dlc: job.frame.dlc,
+                data: job.frame.data,
+                cycle_ms: job.interval_ms,
+                signal_values: None,
+            })
+            .collect(),
+    }
 }
 
 /// Save project to file
 #[tauri::command]
 pub async fn save_project(
     file_path: String,
-    channels: Vec<ProjectChannel>,
+    nets: Vec<ProjectNet>,
     filters: Vec<ProjectFilter>,
-    transmit_jobs: Vec<ProjectTransmitJob>,
+    transmit_rows: Vec<ProjectTransmitRow>,
 ) -> Result<(), String> {
     let project = ProjectFile {
-        version: "1.0".to_string(),
-        channels,
+        version: "2.0".to_string(),
+        nets,
         filters,
-        transmit_jobs,
+        transmit_rows,
     };
 
     let json = serde_json::to_string_pretty(&project)
@@ -1146,7 +1180,7 @@ pub async fn save_project(
     Ok(())
 }
 
-/// Load project from file
+/// Load project from file (accepts 1.0 and 2.0 formats)
 #[tauri::command]
 pub async fn load_project(
     file_path: String,
@@ -1154,42 +1188,44 @@ pub async fn load_project(
     let contents = fs::read_to_string(&file_path)
         .map_err(|e| format!("Failed to read project file: {}", e))?;
 
-    let project: ProjectFile = serde_json::from_str(&contents)
+    let raw: serde_json::Value = serde_json::from_str(&contents)
         .map_err(|e| format!("Failed to parse project file: {}", e))?;
+    let version = raw
+        .get("version")
+        .and_then(|v| v.as_str())
+        .unwrap_or("1.0");
 
-    // Validate and clean up project data
-    let available_interfaces = enumerate_interfaces();
-    let available_interface_ids: std::collections::HashSet<String> = available_interfaces
-        .iter()
-        .map(|i| i.id.clone())
-        .collect();
+    let project: ProjectFile = if version.starts_with("2") {
+        serde_json::from_value(raw)
+            .map_err(|e| format!("Failed to parse project file (v2): {}", e))?
+    } else {
+        let v1: ProjectFileV1 = serde_json::from_value(raw)
+            .map_err(|e| format!("Failed to parse project file (v1): {}", e))?;
+        log::info!("Migrating project file from version 1.0 to 2.0");
+        migrate_project_v1(v1)
+    };
 
-    // Validate channels - set interface_id to None if interface doesn't exist
-    let validated_channels: Vec<ProjectChannel> = project.channels
+    // Validate symbol file paths still exist (device bindings are kept as-is;
+    // the UI shows unplugged devices distinctly).
+    let validated_nets: Vec<ProjectNet> = project
+        .nets
         .into_iter()
-        .map(|mut ch| {
-            if let Some(ref interface_id) = ch.interface_id {
-                if !available_interface_ids.contains(interface_id) {
-                    log::warn!("Interface {} not available, setting to None", interface_id);
-                    ch.interface_id = None;
+        .map(|mut net| {
+            if let Some(ref path) = net.symbol_file_path {
+                if !PathBuf::from(path).exists() {
+                    log::warn!("Symbol file {} not found, clearing", path);
+                    net.symbol_file_path = None;
                 }
             }
-            // Validate DBC file exists
-            if let Some(ref dbc_path) = ch.dbc_file {
-                if !PathBuf::from(dbc_path).exists() {
-                    log::warn!("DBC file {} not found, setting to None", dbc_path);
-                    ch.dbc_file = None;
-                }
-            }
-            ch
+            net
         })
         .collect();
 
     let validated_project = ProjectFile {
-        version: project.version,
-        channels: validated_channels,
+        version: "2.0".to_string(),
+        nets: validated_nets,
         filters: project.filters,
-        transmit_jobs: project.transmit_jobs,
+        transmit_rows: project.transmit_rows,
     };
 
     log::info!("Project loaded from {}", file_path);

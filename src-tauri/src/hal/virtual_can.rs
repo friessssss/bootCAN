@@ -1,13 +1,12 @@
 use super::traits::{BusState, CanFilter, CanInterface, InterfaceInfo};
 use crate::core::message::CanFrame;
-use async_trait::async_trait;
 use parking_lot::Mutex;
 use std::collections::VecDeque;
 use std::sync::Arc;
 use std::time::Instant;
 
 /// Virtual CAN interface for testing without hardware
-/// 
+///
 /// This interface provides a loopback mechanism where transmitted frames
 /// are echoed back as received frames. Useful for development and testing.
 pub struct VirtualCanInterface {
@@ -35,6 +34,7 @@ impl VirtualCanInterface {
     }
 
     /// Get the receive buffer for external access (e.g., for simulation)
+    #[allow(dead_code)]
     pub fn get_rx_buffer(&self) -> Arc<Mutex<VecDeque<CanFrame>>> {
         self.rx_buffer.clone()
     }
@@ -62,7 +62,6 @@ impl VirtualCanInterface {
     }
 }
 
-#[async_trait]
 impl CanInterface for VirtualCanInterface {
     fn info(&self) -> InterfaceInfo {
         InterfaceInfo {
@@ -70,10 +69,11 @@ impl CanInterface for VirtualCanInterface {
             name: self.name.clone(),
             interface_type: "virtual".to_string(),
             available: true,
+            ..Default::default()
         }
     }
 
-    async fn connect(&mut self, bitrate: u32) -> Result<(), String> {
+    fn connect(&mut self, bitrate: u32) -> Result<(), String> {
         if self.connected {
             return Err("Already connected".to_string());
         }
@@ -83,16 +83,12 @@ impl CanInterface for VirtualCanInterface {
         self.start_time = Some(Instant::now());
         self.rx_buffer.lock().clear();
 
-        log::info!(
-            "Virtual CAN {} connected at {} bps",
-            self.id,
-            bitrate
-        );
+        log::info!("Virtual CAN {} connected at {} bps", self.id, bitrate);
 
         Ok(())
     }
 
-    async fn disconnect(&mut self) -> Result<(), String> {
+    fn disconnect(&mut self) -> Result<(), String> {
         if !self.connected {
             return Err("Not connected".to_string());
         }
@@ -110,7 +106,7 @@ impl CanInterface for VirtualCanInterface {
         self.connected
     }
 
-    async fn send(&mut self, frame: &CanFrame) -> Result<(), String> {
+    fn send(&mut self, frame: &CanFrame) -> Result<(), String> {
         if !self.connected {
             return Err("Not connected".to_string());
         }
@@ -119,7 +115,7 @@ impl CanInterface for VirtualCanInterface {
         let mut echo_frame = frame.clone();
         echo_frame.direction = "rx".to_string();
         echo_frame.channel = self.id.clone();
-        
+
         if let Some(start) = self.start_time {
             echo_frame.timestamp = start.elapsed().as_secs_f64();
         }
@@ -144,13 +140,14 @@ impl CanInterface for VirtualCanInterface {
         Ok(())
     }
 
-    async fn receive(&mut self) -> Result<Option<CanFrame>, String> {
+    fn receive_batch(&mut self, max: usize) -> Result<Vec<CanFrame>, String> {
         if !self.connected {
             return Err("Not connected".to_string());
         }
 
         let mut buffer = self.rx_buffer.lock();
-        Ok(buffer.pop_front())
+        let n = buffer.len().min(max);
+        Ok(buffer.drain(..n).collect())
     }
 
     fn set_filter(&mut self, filter: Option<CanFilter>) -> Result<(), String> {
@@ -169,10 +166,12 @@ impl CanInterface for VirtualCanInterface {
 
 /// Shared virtual bus that multiple VirtualCanInterfaces can connect to
 /// This allows simulating a real CAN bus with multiple nodes
+#[allow(dead_code)]
 pub struct VirtualCanBus {
     nodes: Vec<Arc<Mutex<VirtualCanInterface>>>,
 }
 
+#[allow(dead_code)]
 impl VirtualCanBus {
     /// Create a new virtual CAN bus
     pub fn new() -> Self {
@@ -205,59 +204,74 @@ impl Default for VirtualCanBus {
 mod tests {
     use super::*;
 
-    #[tokio::test]
-    async fn test_virtual_can_connect_disconnect() {
+    #[test]
+    fn test_virtual_can_connect_disconnect() {
         let mut vcan = VirtualCanInterface::new("vcan_test");
-        
+
         assert!(!vcan.is_connected());
-        
-        vcan.connect(500_000).await.unwrap();
+
+        vcan.connect(500_000).unwrap();
         assert!(vcan.is_connected());
-        
-        vcan.disconnect().await.unwrap();
+
+        vcan.disconnect().unwrap();
         assert!(!vcan.is_connected());
     }
 
-    #[tokio::test]
-    async fn test_virtual_can_loopback() {
+    #[test]
+    fn test_virtual_can_loopback() {
         let mut vcan = VirtualCanInterface::new("vcan_test");
-        vcan.connect(500_000).await.unwrap();
+        vcan.connect(500_000).unwrap();
 
         let frame = CanFrame::new(0x123, &[1, 2, 3, 4]);
-        vcan.send(&frame).await.unwrap();
+        vcan.send(&frame).unwrap();
 
-        let received = vcan.receive().await.unwrap();
-        assert!(received.is_some());
-        
-        let rx_frame = received.unwrap();
-        assert_eq!(rx_frame.id, 0x123);
-        assert_eq!(rx_frame.data, vec![1, 2, 3, 4]);
+        let received = vcan.receive_batch(64).unwrap();
+        assert_eq!(received.len(), 1);
+        assert_eq!(received[0].id, 0x123);
+        assert_eq!(received[0].data, vec![1, 2, 3, 4]);
     }
 
-    #[tokio::test]
-    async fn test_virtual_can_filter() {
+    #[test]
+    fn test_virtual_can_filter() {
         let mut vcan = VirtualCanInterface::new("vcan_test");
-        vcan.connect(500_000).await.unwrap();
+        vcan.connect(500_000).unwrap();
 
         // Set filter to only accept ID 0x200
         vcan.set_filter(Some(CanFilter::single(0x200, false))).unwrap();
 
         // Send a frame that doesn't match
         let frame1 = CanFrame::new(0x123, &[1, 2, 3, 4]);
-        vcan.send(&frame1).await.unwrap();
+        vcan.send(&frame1).unwrap();
 
         // Should not receive it
-        let received = vcan.receive().await.unwrap();
-        assert!(received.is_none());
+        assert!(vcan.receive_batch(64).unwrap().is_empty());
 
         // Send a frame that matches
         let frame2 = CanFrame::new(0x200, &[5, 6, 7, 8]);
-        vcan.send(&frame2).await.unwrap();
+        vcan.send(&frame2).unwrap();
 
         // Should receive it
-        let received = vcan.receive().await.unwrap();
-        assert!(received.is_some());
-        assert_eq!(received.unwrap().id, 0x200);
+        let received = vcan.receive_batch(64).unwrap();
+        assert_eq!(received.len(), 1);
+        assert_eq!(received[0].id, 0x200);
+    }
+
+    #[test]
+    fn test_receive_batch_drains_in_order() {
+        let mut vcan = VirtualCanInterface::new("vcan_test");
+        vcan.connect(500_000).unwrap();
+
+        for i in 0..10u8 {
+            vcan.send(&CanFrame::new(0x100 + i as u32, &[i])).unwrap();
+        }
+
+        let first = vcan.receive_batch(4).unwrap();
+        assert_eq!(first.len(), 4);
+        assert_eq!(first[0].id, 0x100);
+        assert_eq!(first[3].id, 0x103);
+
+        let rest = vcan.receive_batch(100).unwrap();
+        assert_eq!(rest.len(), 6);
+        assert_eq!(rest[5].id, 0x109);
     }
 }
-

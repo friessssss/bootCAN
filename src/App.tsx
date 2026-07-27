@@ -1,15 +1,15 @@
 import { useEffect } from "react";
+import { useShallow } from "zustand/react/shallow";
 import { useCanStore } from "./stores/canStore";
-import { MessageViewer } from "./components/MessageViewer";
+import { MonitorWindow } from "./components/MonitorWindow";
 import { PlotPanel } from "./components/PlotPanel";
-import { TransmitPanel } from "./components/TransmitPanel";
 import { Toolbar } from "./components/Toolbar";
-import { SignalInspector } from "./components/SignalInspector";
-import { ChannelManager } from "./components/ChannelManager";
+import { NetManager } from "./components/NetManager";
 import { FilterPanel } from "./components/FilterPanel";
 
 function App() {
-  const { initializeBackend, viewTab } = useCanStore();
+  const initializeBackend = useCanStore((s) => s.initializeBackend);
+  const viewTab = useCanStore((s) => s.viewTab);
 
   useEffect(() => {
     initializeBackend();
@@ -17,83 +17,93 @@ function App() {
 
   return (
     <div className="h-screen flex flex-col bg-can-bg-primary">
-      {/* Top Toolbar */}
       <Toolbar />
 
-      {/* Main Content Area */}
       <div className="flex-1 flex overflow-hidden">
-        {/* Left Sidebar - Channels & Status (only in Monitor tab) */}
+        {/* Left sidebar: Nets & filters (Monitor tab only) */}
         {viewTab === "monitor" && (
-          <aside className="w-72 flex flex-col border-r border-can-border bg-can-bg-secondary overflow-y-auto">
-            <ChannelManager />
+          <aside className="w-72 flex flex-col border-r border-can-border bg-can-bg-secondary overflow-y-auto shrink-0">
+            <NetManager />
             <FilterPanel />
           </aside>
         )}
 
-        {/* Center - Message Viewer or Plot Panel */}
+        {/* Center: combined receive/transmit window or plot */}
         <main className="flex-1 flex flex-col overflow-hidden">
-          {viewTab === "monitor" ? <MessageViewer /> : <PlotPanel />}
+          {viewTab === "monitor" ? <MonitorWindow /> : <PlotPanel />}
         </main>
-
-        {/* Right Sidebar - Transmit Panel & Signal Inspector (only in Monitor tab) */}
-        {viewTab === "monitor" && (
-          <aside className="w-80 border-l border-can-border bg-can-bg-secondary flex flex-col overflow-hidden">
-            <TransmitPanel />
-            <div className="border-t border-can-border overflow-y-auto">
-              <SignalInspector />
-            </div>
-          </aside>
-        )}
       </div>
 
-      {/* Bottom Status Bar */}
       <StatusBar />
     </div>
   );
 }
 
 function StatusBar() {
-  const { connectionStatus, traceMessages, activeChannel, channelBusStats } = useCanStore();
-  const busStats = activeChannel ? channelBusStats.get(activeChannel) : null;
-  const busLoad = busStats?.busLoad ?? 0;
+  const nets = useCanStore(useShallow((s) => s.nets));
+  const busStats = useCanStore((s) => s.busStats);
+  const monitorCount = useCanStore((s) => s.monitorMessages.size);
+  const traceCount = useCanStore((s) => s.traceMessages.length);
+  const isPaused = useCanStore((s) => s.isPaused);
+
+  const busStateLabel = (state?: string) => {
+    switch (state) {
+      case "warning":
+        return " · warning";
+      case "passive":
+        return " · error passive";
+      case "busOff":
+        return " · BUS OFF";
+      default:
+        return "";
+    }
+  };
 
   return (
     <footer className="h-6 px-4 flex items-center justify-between bg-can-bg-tertiary border-t border-can-border text-xs text-can-text-secondary">
-      <div className="flex items-center gap-4">
-        <span
-          className={`flex items-center gap-1.5 ${
-            connectionStatus === "connected"
-              ? "text-can-accent-green"
-              : connectionStatus === "error"
-                ? "text-can-accent-red"
-                : "text-can-text-muted"
-          }`}
-        >
-          <span
-            className={`w-2 h-2 rounded-full ${
-              connectionStatus === "connected"
-                ? "bg-can-accent-green"
-                : connectionStatus === "error"
-                  ? "bg-can-accent-red"
-                  : "bg-can-text-muted"
-            }`}
-          />
-          {connectionStatus === "connected"
-            ? "Connected"
-            : connectionStatus === "connecting"
-              ? "Connecting..."
-              : connectionStatus === "error"
-                ? "Error"
-                : "Disconnected"}
-        </span>
-        <span>Messages: {traceMessages.length.toLocaleString()}</span>
+      <div className="flex items-center gap-4 min-w-0">
+        {nets.length === 0 ? (
+          <span className="text-can-text-muted">No nets defined</span>
+        ) : (
+          nets.map((net) => {
+            const stats = busStats.get(net.id);
+            const connected = net.connectionStatus === "connected";
+            const bad = stats?.busState === "busOff" || stats?.busState === "passive";
+            return (
+              <span key={net.id} className="flex items-center gap-1.5 min-w-0">
+                <span
+                  className={`w-2 h-2 rounded-full shrink-0 ${
+                    connected
+                      ? bad
+                        ? "bg-can-accent-red"
+                        : stats?.busState === "warning"
+                          ? "bg-can-accent-amber"
+                          : "bg-can-accent-green"
+                      : net.connectionStatus === "error"
+                        ? "bg-can-accent-red"
+                        : "bg-can-text-muted"
+                  }`}
+                />
+                <span className="truncate">
+                  {net.name}
+                  {connected && stats
+                    ? `: ${stats.busLoad.toFixed(1)}%${busStateLabel(stats.busState)}`
+                    : net.connectionStatus === "error"
+                      ? ": error"
+                      : ""}
+                </span>
+              </span>
+            );
+          })
+        )}
       </div>
-      <div className="flex items-center gap-4">
-        {activeChannel && <span>Bus Load: {busLoad.toFixed(1)}%</span>}
+      <div className="flex items-center gap-4 shrink-0">
+        {isPaused && <span className="text-can-accent-amber">PAUSED</span>}
+        <span>IDs: {monitorCount.toLocaleString()}</span>
+        <span>Trace: {traceCount.toLocaleString()}</span>
       </div>
     </footer>
   );
 }
 
 export default App;
-

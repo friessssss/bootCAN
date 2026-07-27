@@ -1,37 +1,41 @@
-// Project file type definitions for bootCAN project files
+// bootCAN project file schema (version 2.0).
+//
+// This is the single source of truth for the shapes exchanged with the
+// backend's save_project / load_project commands. The backend migrates
+// version 1.0 files (channels/transmitJobs) to this shape on load.
 
-export interface ProjectChannel {
+export interface ProjectNet {
   id: string;
   name: string;
-  interfaceId: string | null;
   bitrate: number;
-  dbcFile: string | null; // File path, will be validated on load
+  /** Detected interface id this net was last bound to (kept even if unplugged). */
+  assignedDeviceId: string | null;
+  symbolFilePath: string | null;
+  comment: string | null;
 }
 
 export interface ProjectFilter {
-  type: string;
-  [key: string]: any;
+  data: any;
 }
 
-export interface ProjectTransmitJob {
+export interface ProjectTransmitRow {
   id: string;
-  frame: {
-    id: number;
-    isExtended: boolean;
-    isRemote: boolean;
-    dlc: number;
-    data: number[];
-    channel?: string;
-  };
-  intervalMs: number;
-  enabled: boolean;
-  // Note: backendJobId is not saved as it's runtime-only
+  name: string;
+  comment: string;
+  netId: string | null;
+  canId: number;
+  isExtended: boolean;
+  isRemote: boolean;
+  dlc: number;
+  data: number[];
+  /** Cycle time in ms; 0 = manual-only. Rows always load paused. */
+  cycleMs: number;
+  signalValues: Record<string, number> | null;
 }
 
 export interface ProjectFile {
-  version: string; // For future compatibility
-  channels: ProjectChannel[];
+  version: string;
+  nets: ProjectNet[];
   filters: ProjectFilter[];
-  transmitJobs: ProjectTransmitJob[];
+  transmitRows: ProjectTransmitRow[];
 }
-

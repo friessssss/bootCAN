@@ -1,0 +1,10 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "bootcan-ui",
+      "url": "http://localhost:1420",
+      "port": 1420
+    }
+  ]
+}

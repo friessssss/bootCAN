@@ -34,12 +34,16 @@ export function PlotPanel() {
     togglePlotPause,
     setPlotTimeWindow,
     setPlotData,
-    channels,
+    nets,
     loadTrace,
     playbackState,
     loadedTraceFile,
-    loadedDbcFiles,
   } = useCanStore();
+
+  const symbolNetIds = useMemo(
+    () => new Set(nets.filter((n) => n.symbolFilePath).map((n) => n.id)),
+    [nets]
+  );
 
   const chartRef = useRef<HTMLDivElement>(null);
   const plotRef = useRef<uPlot | null>(null);
@@ -131,7 +135,7 @@ export function PlotPanel() {
             const signalKeys = new Set<string>(); // All signal keys for quick lookup
             
             for (const sig of selectedPlotSignals) {
-              if (!loadedDbcFiles.has(sig.channelId)) continue;
+              if (!symbolNetIds.has(sig.channelId)) continue;
               
               const key = `${sig.channelId}-${sig.messageId}-${sig.signalName}`;
               signalKeys.add(key);
@@ -153,7 +157,7 @@ export function PlotPanel() {
             for (const frame of allFrames) {
               // Fast lookup: check if this channel/message combo has any selected signals
               const channelMsgs = signalKeyMap.get(frame.channel);
-              if (channelMsgs && channelMsgs.has(frame.id.toString()) && loadedDbcFiles.has(frame.channel)) {
+              if (channelMsgs && channelMsgs.has(frame.id.toString()) && symbolNetIds.has(frame.channel)) {
                 const msgKey = `${frame.channel}-${frame.id}`;
                 const signalNames = Array.from(signalNameMap.get(msgKey) || []);
                 if (signalNames.length > 0) {
@@ -174,8 +178,8 @@ export function PlotPanel() {
               
               // Prepare batch decode request
               const decodeRequests = batch.map(({ frame }) => ({
-                channel_id: frame.channel,
-                message_id: frame.id,
+                channelId: frame.channel,
+                messageId: frame.id,
                 data: frame.data,
               }));
 
@@ -448,7 +452,7 @@ export function PlotPanel() {
     ];
     
     return { data: typedData, series };
-  }, [selectedPlotSignals, plotData, plotTimeWindow, channels, isLoadingTrace]);
+  }, [selectedPlotSignals, plotData, plotTimeWindow, nets, isLoadingTrace]);
 
 
   // Initialize/update uPlot chart

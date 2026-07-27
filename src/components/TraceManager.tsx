@@ -1,4 +1,4 @@
-import { useCanStore } from "../stores/canStore";
+import { useCanStore, useAnyConnected } from "../stores/canStore";
 import { open, save } from "@tauri-apps/plugin-dialog";
 import {
   PlayIcon,
@@ -8,6 +8,7 @@ import {
   ArrowDownTrayIcon,
 } from "./icons";
 
+/** Compact trace logging + playback controls, shown above the trace list. */
 export function TraceManager() {
   const {
     isLogging,
@@ -16,8 +17,6 @@ export function TraceManager() {
     playbackSpeed,
     loadedTraceFile,
     playbackFrameCount,
-    playbackCurrentIndex,
-    connectionStatus,
     startLogging,
     stopLogging,
     loadTrace,
@@ -27,6 +26,7 @@ export function TraceManager() {
     resumePlayback,
     setPlaybackSpeed,
   } = useCanStore();
+  const anyConnected = useAnyConnected();
 
   const handleStartLogging = async () => {
     try {
@@ -45,14 +45,6 @@ export function TraceManager() {
       }
     } catch (error) {
       console.error("Failed to start logging:", error);
-    }
-  };
-
-  const handleStopLogging = async () => {
-    try {
-      await stopLogging();
-    } catch (error) {
-      console.error("Failed to stop logging:", error);
     }
   };
 
@@ -76,150 +68,97 @@ export function TraceManager() {
     }
   };
 
-  const handlePlaybackControl = async (action: "play" | "pause" | "stop") => {
+  const handlePlay = async () => {
     try {
-      switch (action) {
-        case "play":
-          if (playbackState === "paused") {
-            await resumePlayback();
-          } else {
-            await startPlayback();
-          }
-          break;
-        case "pause":
-          await pausePlayback();
-          break;
-        case "stop":
-          await stopPlayback();
-          break;
-      }
+      if (playbackState === "paused") await resumePlayback();
+      else await startPlayback();
     } catch (error) {
-      console.error("Failed to control playback:", error);
-    }
-  };
-
-  const handleSpeedChange = async (speed: number) => {
-    try {
-      await setPlaybackSpeed(speed);
-    } catch (error) {
-      console.error("Failed to set playback speed:", error);
+      console.error("Failed to start playback:", error);
     }
   };
 
   return (
-    <div className="p-4 space-y-4 border-b border-can-border">
-      <h3 className="text-sm font-semibold text-can-text-primary">Trace Management</h3>
+    <div className="flex items-center gap-2 px-3 py-1.5 w-full flex-wrap">
+      {/* Logging to file */}
+      {!isLogging ? (
+        <button
+          onClick={handleStartLogging}
+          className="btn btn-secondary h-6 text-xs flex items-center gap-1"
+          disabled={!anyConnected}
+          title="Log incoming frames to a CSV/TRC file"
+        >
+          <ArrowDownTrayIcon className="w-3 h-3" />
+          Log to File
+        </button>
+      ) : (
+        <button
+          onClick={() => stopLogging().catch(console.error)}
+          className="btn btn-danger h-6 text-xs flex items-center gap-1"
+          title={logFilePath ?? undefined}
+        >
+          <StopIcon className="w-3 h-3" />
+          Stop Logging
+        </button>
+      )}
 
-      {/* Logging Section */}
-      <div className="space-y-2">
-        <div className="flex items-center justify-between">
-          <span className="text-xs text-can-text-secondary">Logging</span>
-          {isLogging && (
-            <span className="text-xs text-can-accent-red">● Recording</span>
-          )}
-        </div>
-        <div className="flex gap-2">
-          {!isLogging ? (
-            <button
-              onClick={handleStartLogging}
-              className="btn btn-success flex-1 text-xs"
-              disabled={connectionStatus !== "connected"}
-            >
-              <ArrowDownTrayIcon className="w-3 h-3" />
-              Start Logging
-            </button>
-          ) : (
-            <button
-              onClick={handleStopLogging}
-              className="btn btn-danger flex-1 text-xs"
-            >
-              <StopIcon className="w-3 h-3" />
-              Stop Logging
-            </button>
-          )}
-        </div>
-        {logFilePath && (
-          <div className="text-xs text-can-text-muted truncate">
-            {logFilePath.split("/").pop() || logFilePath}
-          </div>
-        )}
-      </div>
+      <div className="w-px h-4 bg-can-border" />
 
-      {/* Playback Section */}
-      <div className="space-y-2">
-        <div className="flex items-center justify-between">
-          <span className="text-xs text-can-text-secondary">Playback</span>
-          {loadedTraceFile && (
-            <span className="text-xs text-can-text-muted">
-              {playbackCurrentIndex} / {playbackFrameCount}
-            </span>
-          )}
-        </div>
-        <div className="flex gap-2">
+      {/* Playback */}
+      <button
+        onClick={handleLoadTrace}
+        className="btn btn-secondary h-6 text-xs flex items-center gap-1"
+      >
+        <FolderOpenIcon className="w-3 h-3" />
+        Load Trace
+      </button>
+
+      {loadedTraceFile && (
+        <>
           <button
-            onClick={handleLoadTrace}
-            className="btn btn-secondary flex-1 text-xs"
+            onClick={handlePlay}
+            className="btn btn-success h-6 text-xs flex items-center gap-1"
+            disabled={playbackState === "playing"}
           >
-            <FolderOpenIcon className="w-3 h-3" />
-            Load Trace
+            <PlayIcon className="w-3 h-3" />
+            Play
           </button>
-        </div>
+          <button
+            onClick={() => pausePlayback().catch(console.error)}
+            className="btn btn-secondary h-6 text-xs"
+            disabled={playbackState !== "playing"}
+          >
+            <PauseIcon className="w-3 h-3" />
+          </button>
+          <button
+            onClick={() => stopPlayback().catch(console.error)}
+            className="btn btn-secondary h-6 text-xs"
+            disabled={playbackState === "stopped"}
+          >
+            <StopIcon className="w-3 h-3" />
+          </button>
 
-        {loadedTraceFile && (
-          <>
-            <div className="flex gap-2">
-              <button
-                onClick={() => handlePlaybackControl("play")}
-                className="btn btn-success flex-1 text-xs"
-                disabled={playbackState === "playing" && connectionStatus !== "connected"}
-              >
-                <PlayIcon className="w-3 h-3" />
-                Play
-              </button>
-              <button
-                onClick={() => handlePlaybackControl("pause")}
-                className="btn btn-secondary text-xs"
-                disabled={playbackState !== "playing"}
-              >
-                <PauseIcon className="w-3 h-3" />
-              </button>
-              <button
-                onClick={() => handlePlaybackControl("stop")}
-                className="btn btn-secondary text-xs"
-                disabled={playbackState === "stopped"}
-              >
-                <StopIcon className="w-3 h-3" />
-              </button>
-            </div>
+          <label className="flex items-center gap-1.5 text-xs text-can-text-secondary ml-1">
+            Speed
+            <input
+              type="range"
+              min="0.1"
+              max="5"
+              step="0.1"
+              value={playbackSpeed}
+              onChange={(e) => setPlaybackSpeed(parseFloat(e.target.value)).catch(console.error)}
+              className="w-20"
+            />
+            <span className="w-8 text-can-text-primary">{playbackSpeed.toFixed(1)}×</span>
+          </label>
 
-            <div className="space-y-1">
-              <div className="flex items-center justify-between">
-                <span className="text-xs text-can-text-secondary">Speed</span>
-                <span className="text-xs text-can-text-primary">{playbackSpeed.toFixed(1)}×</span>
-              </div>
-              <input
-                type="range"
-                min="0.1"
-                max="5"
-                step="0.1"
-                value={playbackSpeed}
-                onChange={(e) => handleSpeedChange(parseFloat(e.target.value))}
-                className="w-full"
-              />
-              <div className="flex justify-between text-xxs text-can-text-muted">
-                <span>0.1×</span>
-                <span>1×</span>
-                <span>5×</span>
-              </div>
-            </div>
-
-            <div className="text-xs text-can-text-muted truncate">
-              {loadedTraceFile.split("/").pop() || loadedTraceFile}
-            </div>
-          </>
-        )}
-      </div>
+          <span
+            className="text-xxs text-can-text-muted truncate max-w-48 ml-auto"
+            title={loadedTraceFile}
+          >
+            {loadedTraceFile.split("/").pop()} · {playbackFrameCount.toLocaleString()} frames
+          </span>
+        </>
+      )}
     </div>
   );
 }
-

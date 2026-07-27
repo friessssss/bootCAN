@@ -51,7 +51,8 @@ pub struct Channel {
 impl Channel {
     /// Create a new channel
     pub fn new(id: String) -> Self {
-        let (message_tx, _) = broadcast::channel(1000);
+        // Large capacity so the trace-logger subscriber can't lag under flood
+        let (message_tx, _) = broadcast::channel(65_536);
         Self {
             id,
             config: ChannelConfig::default(),
@@ -70,7 +71,7 @@ impl Channel {
     }
 
     /// Connect to the CAN interface
-    pub async fn connect(&mut self, config: ChannelConfig) -> Result<(), String> {
+    pub fn connect(&mut self, config: ChannelConfig) -> Result<(), String> {
         self.state = ChannelState::Connecting;
         self.config = config.clone();
 
@@ -106,7 +107,7 @@ impl Channel {
         self.interface = Some(interface);
 
         if let Some(ref mut iface) = self.interface {
-            match iface.connect(config.bitrate).await {
+            match iface.connect(config.bitrate) {
                 Ok(()) => {
                     self.state = ChannelState::Connected;
                     self.start_time = Some(Instant::now());
@@ -125,9 +126,9 @@ impl Channel {
     }
 
     /// Disconnect from the CAN interface
-    pub async fn disconnect(&mut self) -> Result<(), String> {
+    pub fn disconnect(&mut self) -> Result<(), String> {
         if let Some(ref mut iface) = self.interface {
-            iface.disconnect().await?;
+            iface.disconnect()?;
         }
         self.interface = None;
         self.state = ChannelState::Disconnected;
@@ -136,14 +137,14 @@ impl Channel {
     }
 
     /// Send a CAN frame
-    pub async fn send(&mut self, frame: CanFrame) -> Result<(), String> {
+    pub fn send(&mut self, frame: CanFrame) -> Result<(), String> {
         if self.state != ChannelState::Connected {
             return Err("Channel not connected".to_string());
         }
 
         if let Some(ref mut iface) = self.interface {
-            iface.send(&frame).await?;
-            self.stats.record_tx();
+            iface.send(&frame)?;
+            self.stats.record_tx(frame.dlc);
 
             // Broadcast the sent frame
             let mut sent_frame = frame;
@@ -160,38 +161,56 @@ impl Channel {
         }
     }
 
-    /// Receive a CAN frame (non-blocking)
-    pub async fn receive(&mut self) -> Result<Option<CanFrame>, String> {
+    /// Drain up to `max` received frames (non-blocking).
+    ///
+    /// Stamps channel/direction, applies the software filter, records stats,
+    /// and broadcasts each passing frame to subscribers (trace logger).
+    /// Driver-provided (hardware) timestamps are preserved; frames without one
+    /// (timestamp == 0.0) are stamped with time-since-connect.
+    ///
+    /// An `Err` means the interface failed fatally (e.g. device unplugged).
+    pub fn receive_batch(&mut self, max: usize) -> Result<Vec<CanFrame>, String> {
         if self.state != ChannelState::Connected {
-            return Ok(None);
+            return Ok(Vec::new());
         }
 
-        if let Some(ref mut iface) = self.interface {
-            match iface.receive().await {
-                Ok(Some(mut frame)) => {
-                    self.stats.record_rx();
-                    frame.direction = "rx".to_string();
-                    frame.channel = self.id.clone();
-                    if let Some(start) = self.start_time {
-                        frame.timestamp = start.elapsed().as_secs_f64();
-                    }
-                    // Apply filter
-                    if self.filter.matches(&frame) {
-                        let _ = self.message_tx.send(frame.clone());
-                        Ok(Some(frame))
-                    } else {
-                        Ok(None) // Filtered out
-                    }
-                }
-                Ok(None) => Ok(None),
-                Err(e) => {
-                    self.stats.record_error();
-                    Err(e)
+        let Some(ref mut iface) = self.interface else {
+            return Ok(Vec::new());
+        };
+
+        let raw = match iface.receive_batch(max) {
+            Ok(frames) => frames,
+            Err(e) => {
+                self.stats.record_error();
+                self.state = ChannelState::Error(e.clone());
+                return Err(e);
+            }
+        };
+
+        let mut out = Vec::with_capacity(raw.len());
+        for mut frame in raw {
+            self.stats.record_rx(frame.dlc);
+            frame.direction = "rx".to_string();
+            frame.channel = self.id.clone();
+            if frame.timestamp == 0.0 {
+                if let Some(start) = self.start_time {
+                    frame.timestamp = start.elapsed().as_secs_f64();
                 }
             }
-        } else {
-            Ok(None)
+            if self.filter.matches(&frame) {
+                let _ = self.message_tx.send(frame.clone());
+                out.push(frame);
+            }
         }
+        Ok(out)
+    }
+
+    /// Current bus state as reported by the interface driver.
+    pub fn get_bus_state(&self) -> crate::hal::traits::BusState {
+        self.interface
+            .as_ref()
+            .map(|i| i.get_bus_state())
+            .unwrap_or_default()
     }
 
     /// Get current timestamp relative to connection start

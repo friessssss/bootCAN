@@ -57,6 +57,7 @@
   .btn {
     @apply px-3 py-1.5 text-sm font-medium rounded-md transition-colors duration-150;
     @apply focus:outline-none focus:ring-2 focus:ring-can-accent-blue focus:ring-offset-1 focus:ring-offset-can-bg-primary;
+    @apply disabled:opacity-40 disabled:cursor-not-allowed disabled:pointer-events-none;
   }
 
   .btn-primary {
@@ -112,9 +113,9 @@
     @apply bg-can-accent-blue/20 text-can-accent-blue;
   }
 
-  /* Message viewer table styles */
+  /* Message viewer table styles (dense, PCX7-like) */
   .msg-table {
-    @apply w-full text-sm font-mono border-collapse;
+    @apply w-full text-xs font-mono border-collapse;
   }
 
   .msg-table thead {
@@ -122,12 +123,12 @@
   }
 
   .msg-table th {
-    @apply px-3 py-2 text-left text-xs font-semibold text-can-text-secondary uppercase tracking-wider;
+    @apply px-2 py-1.5 text-left text-xxs font-semibold text-can-text-secondary uppercase tracking-wider;
     @apply bg-can-bg-tertiary;
   }
 
   .msg-table td {
-    @apply px-3 py-1.5;
+    @apply px-2 py-[3px];
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
@@ -148,6 +149,22 @@
 
   .hex-byte-changed {
     @apply text-can-accent-yellow;
+  }
+
+  /* Value-change flash: re-triggered by re-keying the byte span */
+  .byte-flash {
+    animation: byte-flash 0.5s ease-out;
+  }
+}
+
+@keyframes byte-flash {
+  0% {
+    color: theme("colors.can.accent.yellow");
+    background-color: theme("colors.can.accent.yellow / 20%");
+    border-radius: 2px;
+  }
+  100% {
+    background-color: transparent;
   }
 }
 

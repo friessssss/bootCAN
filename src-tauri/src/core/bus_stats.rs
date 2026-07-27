@@ -16,6 +16,9 @@ pub struct BusStats {
     pub tx_error_counter: u8,
     /// Receive error counter (REC)
     pub rx_error_counter: u8,
+    /// Accumulated wire bits (for bus-load calculation; not sent to frontend)
+    #[serde(skip)]
+    pub bits_total: u64,
 }
 
 impl BusStats {
@@ -30,13 +33,15 @@ impl BusStats {
     }
 
     /// Increment TX count
-    pub fn record_tx(&mut self) {
+    pub fn record_tx(&mut self, dlc: u8) {
         self.tx_count += 1;
+        self.bits_total += Self::frame_bits(dlc);
     }
 
     /// Increment RX count
-    pub fn record_rx(&mut self) {
+    pub fn record_rx(&mut self, dlc: u8) {
         self.rx_count += 1;
+        self.bits_total += Self::frame_bits(dlc);
     }
 
     /// Record an error
@@ -44,13 +49,15 @@ impl BusStats {
         self.error_count += 1;
     }
 
-    /// Update bus load estimate
-    /// This is a simplified calculation based on message rate
-    pub fn update_bus_load(&mut self, messages_per_second: f64, bitrate: u32) {
-        // Assume average message is ~100 bits (including overhead)
-        // Bus load = (bits transmitted per second) / bitrate * 100
-        let bits_per_message = 100.0;
-        let bits_per_second = messages_per_second * bits_per_message;
+    /// Approximate wire bits for a classic CAN frame: ~47 bits of overhead
+    /// (SOF, arbitration, control, CRC, ACK, EOF, interframe space) + data.
+    /// Ignores stuff bits and the extended-ID surcharge.
+    fn frame_bits(dlc: u8) -> u64 {
+        47 + 8 * dlc.min(8) as u64
+    }
+
+    /// Update bus load estimate from the observed wire-bit rate.
+    pub fn update_bus_load(&mut self, bits_per_second: f64, bitrate: u32) {
         self.bus_load = (bits_per_second / bitrate as f64 * 100.0).min(100.0);
     }
 }

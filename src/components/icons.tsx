@@ -259,4 +259,3 @@ export function PencilIcon({ className }: IconProps) {
     </svg>
   );
 }
-

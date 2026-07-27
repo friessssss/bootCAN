@@ -27,7 +27,7 @@ interface SignalOption {
 }
 
 export function SignalSelector() {
-  const { selectedPlotSignals, addPlotSignal, removePlotSignal, channels } = useCanStore();
+  const { selectedPlotSignals, addPlotSignal, removePlotSignal, nets } = useCanStore();
   const [isOpen, setIsOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
   const [allSignals, setAllSignals] = useState<MessageWithSignals[]>([]);
@@ -57,13 +57,13 @@ export function SignalSelector() {
     const channelMap = new Map<string, { id: string; name: string }>();
     for (const msg of allSignals) {
       if (!channelMap.has(msg.channelId)) {
-        const channelName = channels.find(c => c.id === msg.channelId)?.name || msg.channelId;
+        const channelName = nets.find(c => c.id === msg.channelId)?.name || msg.channelId;
         channelMap.set(msg.channelId, { id: msg.channelId, name: channelName });
       }
     }
     // Sort by channel name for display
     return Array.from(channelMap.values()).sort((a, b) => a.name.localeCompare(b.name));
-  }, [allSignals, channels]);
+  }, [allSignals, nets]);
 
   // Initialize selected channels to all channels when signals are first loaded
   useEffect(() => {
@@ -86,7 +86,7 @@ export function SignalSelector() {
         // Skip non-numeric signals (enumerated/boolean for MVP)
         if (signal.valueType === "unsigned" || signal.valueType === "signed" || 
             signal.valueType === "float" || signal.valueType === "double") {
-          // const channelName = channels.find(c => c.id === msg.channelId)?.name || msg.channelId;
+          // const channelName = nets.find(c => c.id === msg.channelId)?.name || msg.channelId;
           const idHex = `0x${msg.messageId.toString(16).toUpperCase().padStart(3, "0")}`;
           const displayText = `${signal.name} (${msg.messageName} @ ${idHex})${signal.unit ? ` [${signal.unit}]` : ""}`;
           
@@ -105,7 +105,7 @@ export function SignalSelector() {
     
     // Sort alphabetically by signal name
     return options.sort((a, b) => a.signalName.localeCompare(b.signalName));
-  }, [allSignals, channels, selectedChannels]);
+  }, [allSignals, nets, selectedChannels]);
 
   // Filter options based on search query
   const filteredOptions = useMemo(() => {

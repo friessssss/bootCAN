@@ -225,10 +225,14 @@ impl SymParser {
         let mut min_val = None;
         let mut max_val = None;
         let mut value_table_name = None;
+        let mut byte_order = ByteOrder::LittleEndian; // SYM default is Intel
 
         // Parse attributes
         for part in parts.iter().skip(3) {
-            if part.starts_with("/f:") {
+            if *part == "-m" {
+                // Motorola (big-endian) flag
+                byte_order = ByteOrder::BigEndian;
+            } else if part.starts_with("/f:") {
                 factor = part.trim_start_matches("/f:").parse::<f64>().unwrap_or(1.0);
             } else if part.starts_with("/o:") {
                 offset = part.trim_start_matches("/o:").parse::<f64>().unwrap_or(0.0);
@@ -247,7 +251,7 @@ impl SymParser {
             name,
             start_bit: 0, // Will be set from message assignment
             length,
-            byte_order: ByteOrder::LittleEndian, // SYM files typically use little-endian
+            byte_order,
             value_type,
             factor,
             offset,
@@ -343,10 +347,14 @@ impl SymParser {
         let mut max_val = None;
         let mut enum_name = None;
         let mut _default_val = None; // Default value (not used in decoding, but parsed for completeness)
+        let mut byte_order = ByteOrder::LittleEndian; // SYM default is Intel
 
         // Parse attributes
         for part in parts.iter().skip(3) {
-            if part.starts_with("/f:") {
+            if *part == "-m" {
+                // Motorola (big-endian) flag
+                byte_order = ByteOrder::BigEndian;
+            } else if part.starts_with("/f:") {
                 factor = part.trim_start_matches("/f:").parse::<f64>().unwrap_or(1.0);
             } else if part.starts_with("/o:") {
                 offset = part.trim_start_matches("/o:").parse::<f64>().unwrap_or(0.0);
@@ -367,7 +375,7 @@ impl SymParser {
             name: var_name,
             start_bit: bit_pos,
             length,
-            byte_order: ByteOrder::LittleEndian, // SYM files typically use little-endian
+            byte_order,
             value_type,
             factor,
             offset,

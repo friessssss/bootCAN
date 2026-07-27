@@ -1,6 +1,6 @@
 [package]
 name = "bootcan"
-version = "0.2.0"
+version = "0.3.0"
 description = "A cross-platform CAN/CAN FD network monitoring and analysis tool"
 authors = ["bootCAN Team"]
 edition = "2021"
@@ -22,13 +22,20 @@ tokio = { version = "1", features = ["full"] }
 thiserror = "1"
 log = "0.4"
 env_logger = "0.10"
-async-trait = "0.1"
 parking_lot = "0.12"
 uuid = { version = "1", features = ["v4"] }
 csv = "1.3"
 chrono = { version = "0.4", features = ["serde"] }
 regex = "1"
 rayon = "1"
+crossbeam-channel = "0.5"
+
+# PCAN support via dlopen'd PCBUSB/PCANBasic library (Windows/macOS)
+[target.'cfg(any(target_os = "windows", target_os = "macos"))'.dependencies]
+libloading = "0.8"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+libc = "0.2"
 
 # SocketCAN support (Linux only)
 [target.'cfg(target_os = "linux")'.dependencies]

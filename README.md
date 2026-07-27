@@ -2,17 +2,18 @@
 
 A modern, cross-platform CAN/CAN FD network monitoring and analysis tool built with Rust and React.
 
-**Version 0.2.0**
+**Version 0.3.0**
 
 ## Features
 
 ### Core Functionality
-- **Real-time Message Viewing**: Monitor CAN bus traffic with live filtering and search
-- **Multi-Channel Support**: Manage and monitor multiple CAN channels simultaneously
-- **Message Transmission**: Send individual or periodic CAN messages with customizable timing
+- **PCAN Explorer-style Receive/Transmit window**: aggregated receive list with symbolic names, sortable columns, value-change highlighting, and expandable live signal rows; full-width transmit table with cyclic + manual (spacebar) sending
+- **Signal-level transmit editing**: compose payloads by typing physical signal values (with enum dropdowns); bytes are encoded through the symbol file, with a synced raw-hex view
+- **Nets**: PCAN-style named bus definitions (name + bitrate + symbol file) bound to auto-detected hardware; nets persist in the project when the device is unplugged
+- **Hardware auto-detection**: attached PCAN-USB devices are probed and hot-plug is detected live
 - **Advanced Filtering**: Filter messages by ID, data patterns, and custom criteria
-- **Dual View Modes**: Switch between Monitor mode (statistics) and Trace mode (detailed history)
-- **Signal Plotting & Visualization**: Real-time and trace-based plotting of decoded CAN signals with interactive charts
+- **Dual View Modes**: aggregated Overview and chronological Trace (virtualized for huge traces)
+- **Signal Plotting & Visualization**: Real-time and trace-based plotting of decoded CAN signals
 
 ### DBC/SYM File Support
 - **DBC File Parsing**: Load and parse standard DBC (Database CAN) files
@@ -38,7 +39,7 @@ A modern, cross-platform CAN/CAN FD network monitoring and analysis tool built w
 
 ### Interface Support
 - **SocketCAN** (Linux): Native support for Linux SocketCAN interfaces
-- **PCAN USB** (Windows/macOS): Support for PEAK PCAN USB devices
+- **PCAN USB** (macOS via PCBUSB, loaded at runtime): real driver integration with event-driven receive and hardware timestamps
 - **Virtual CAN**: Built-in virtual CAN interface for testing and development
 
 ### Statistics & Monitoring
@@ -74,9 +75,16 @@ sudo ip link add dev vcan0 type vcan
 sudo ip link set up vcan0
 ```
 
-### Windows/macOS (PCAN)
-- Install [PCAN-Basic API](https://www.peak-system.com/PCAN-Basic.239.0.html) for Windows
-- Install [PCBUSB](https://www.peak-system.com/PCBUSB.239.0.html) for macOS
+### macOS (PCAN-USB)
+Install the MacCAN PCBUSB library (user-space driver for PCAN-USB interfaces):
+1. Download from https://mac-can.github.io/drivers/libPCBUSB/
+2. Copy `libPCBUSB.dylib` to `/usr/local/lib/` (the app also checks `/opt/homebrew/lib/`)
+
+The app loads the library at runtime — it runs fine without it (virtual CAN only) and
+shows attached PCAN-USB devices automatically once the library and device are present.
+
+### Windows (PCAN)
+- Install [PCAN-Basic API](https://www.peak-system.com/PCAN-Basic.239.0.html) (PCANBasic.dll)
 
 ## Installation
 
@@ -267,7 +275,7 @@ For best results, build Windows releases on a Windows machine or use CI/CD.
 |-----------|----------|--------|
 | Virtual CAN | All | ✅ Full support |
 | SocketCAN | Linux | ✅ Full support |
-| PCAN USB | Windows | ✅ Full support (requires PCAN-Basic) |
+| PCAN USB | Windows | ⚠️ Untested (requires PCAN-Basic; polling receive) |
 | PCAN USB | macOS | ✅ Full support (requires PCBUSB) |
 
 ## File Format Support
@@ -277,7 +285,7 @@ For best results, build Windows releases on a Windows machine or use CI/CD.
 | DBC | Database CAN | ✅ Full support |
 | SYM | Symbol file | ✅ Full support |
 | CSV | Trace export/import | ✅ Full support |
-| TRC | Trace file | ✅ Full support (logging and playback) |
+| TRC | Trace file | ✅ Playback + logging (known issue: logged TRC files use a different column layout than the playback parser expects — use CSV for round-tripping) |
 
 ## License
 

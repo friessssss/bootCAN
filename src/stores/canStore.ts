@@ -1,201 +1,154 @@
 import { create } from "zustand";
+import { useShallow } from "zustand/react/shallow";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, UnlistenFn } from "@tauri-apps/api/event";
+import type {
+  BusStats,
+  CanFrame,
+  ConnectionStatus,
+  DecodedSignal,
+  InterfaceInfo,
+  MonitorEntry,
+  MonitorSort,
+  Net,
+  PlotDataPoint,
+  PlotSignal,
+  TransmitRow,
+} from "../types/can";
+import type { ProjectFile, ProjectNet, ProjectTransmitRow } from "../types/project";
 
-// CAN Message Types
-export interface CanFrame {
-  id: number;
-  isExtended: boolean;
-  isRemote: boolean;
-  dlc: number;
-  data: number[];
-  timestamp: number;
-  channel: string;
-  direction: "rx" | "tx";
-}
-
-// Extended frame info for monitor view
-export interface MonitorEntry {
-  frame: CanFrame;
-  count: number;
-  cycleTime: number; // ms between messages
-  lastTimestamp: number;
-}
-
-export interface BusStats {
-  busLoad: number;
-  txCount: number;
-  rxCount: number;
-  errorCount: number;
-  txErrorCounter: number;
-  rxErrorCounter: number;
-}
-
-export interface ChannelBusStats {
-  channelId: string;
-  busLoad: number;
-}
-
-export interface InterfaceInfo {
-  id: string;
-  name: string;
-  type: "socketcan" | "pcan" | "virtual";
-  available: boolean;
-}
-
-export interface TransmitJob {
-  id: string;
-  frame: CanFrame;
-  intervalMs: number;
-  enabled: boolean;
-  backendJobId?: string; // ID returned by backend for cancellation
-}
-
-export interface PlotSignal {
-  channelId: string;
-  messageId: number;
-  signalName: string;
-}
-
-export interface PlotDataPoint {
-  time: number;
-  value: number;
-}
-
-export type ConnectionStatus =
-  | "disconnected"
-  | "connecting"
-  | "connected"
-  | "error";
+export type {
+  BusStats,
+  CanFrame,
+  ConnectionStatus,
+  InterfaceInfo,
+  MonitorEntry,
+  Net,
+  PlotDataPoint,
+  PlotSignal,
+  TransmitRow,
+} from "../types/can";
 
 interface CanState {
-  // Connection state
-  connectionStatus: ConnectionStatus;
-  selectedInterface: string | null;
-  selectedBitrate: number;
+  // Detected hardware / virtual interfaces (auto-updated on hot-plug)
   availableInterfaces: InterfaceInfo[];
-  
-  // Multi-channel state
-  channels: Array<{ 
-    id: string; 
-    name: string;
-    interfaceId: string | null;
-    bitrate: number;
-    dbcFile: string | null;
-    connectionStatus: ConnectionStatus;
-  }>;
-  activeChannel: string | null;
-  
-  // Filter state
-  filters: Array<{
-    type: string;
-    [key: string]: any;
-  }>;
 
-  // Message buffers - trace collects all, monitor shows latest per ID with metadata
+  // Nets: named bus definitions, optionally bound to a detected device
+  nets: Net[];
+  activeNetId: string | null;
+
+  // Filter rules (mirrors backend FilterSet per active net)
+  filters: Array<{ type: string; [key: string]: any }>;
+
+  // Message buffers
   traceMessages: CanFrame[];
-  monitorMessages: Map<string, MonitorEntry>; // key: `${id}-${direction}`
+  monitorMessages: Map<string, MonitorEntry>;
   maxMessages: number;
   isPaused: boolean;
-  
+
+  // Monitor list presentation
+  monitorSort: MonitorSort;
+  idFilter: string;
+  expandedRows: Set<string>; // monitor keys with signal sub-rows expanded
+
+  // Symbolic names: net id -> (message id -> name)
+  messageNames: Map<string, Map<number, string>>;
+
   // Recording state for trace
   isRecording: boolean;
   recordingStartTime: number | null;
-  
+
   // Trace logging state
   isLogging: boolean;
   logFilePath: string | null;
   logFormat: "csv" | "trc";
-  
+
   // Trace playback state
   playbackState: "stopped" | "playing" | "paused";
   playbackSpeed: number;
   loadedTraceFile: string | null;
   playbackFrameCount: number;
-  playbackCurrentIndex: number;
-  
-  // DBC state
-  loadedDbcFiles: Map<string, string>; // channel_id -> file_path
-  selectedMessage: CanFrame | null; // Currently selected message for signal inspection
 
-  // Bus statistics (per channel)
-  channelBusStats: Map<string, BusStats>; // channel_id -> BusStats
+  // Bus statistics per net
+  busStats: Map<string, BusStats>;
 
-  // Transmit state
-  transmitJobs: TransmitJob[];
-  pendingTransmit: Partial<CanFrame>;
+  // Transmit list (PCX7-style rows)
+  transmitRows: TransmitRow[];
+  selectedTransmitRowId: string | null;
 
-  // Filters
-  idFilter: string;
-  showRxOnly: boolean;
-  showTxOnly: boolean;
-
-  // View mode: "trace" shows all messages, "monitor" shows latest per ID
+  // View state
   viewMode: "trace" | "monitor";
-  setViewMode: (mode: "trace" | "monitor") => void;
+  viewTab: "monitor" | "plot";
 
   // Plot state
-  viewTab: "monitor" | "plot";
   selectedPlotSignals: PlotSignal[];
-  plotData: Map<string, PlotDataPoint[]>; // key: `${channelId}-${messageId}-${signalName}`
+  plotData: Map<string, PlotDataPoint[]>;
   isPlotPaused: boolean;
-  plotTimeWindow: number; // seconds
+  plotTimeWindow: number; // seconds; -1 = all
   plotMaxDataPoints: number;
 
-  // Actions
+  // --- Actions ---
   initializeBackend: () => Promise<void>;
-  connect: () => Promise<void>;
-  disconnect: () => Promise<void>;
-  setSelectedInterface: (id: string) => void;
-  setSelectedBitrate: (bitrate: number) => void;
-  sendMessage: (frame: Partial<CanFrame>) => Promise<void>;
+
+  // Messages
   clearMessages: () => void;
-  // Computed getter for current view's messages
-  getDisplayMessages: () => MonitorEntry[];
   togglePause: () => void;
-  setPendingTransmit: (frame: Partial<CanFrame>) => void;
-  addTransmitJob: (job: Omit<TransmitJob, "id">) => void;
-  updateTransmitJob: (id: string, job: Omit<TransmitJob, "id">) => Promise<void>;
-  removeTransmitJob: (id: string) => Promise<void>;
-  toggleTransmitJob: (id: string) => Promise<void>;
   setIdFilter: (filter: string) => void;
+  setMonitorSort: (sort: MonitorSort) => void;
+  toggleRowExpanded: (key: string) => void;
+  setViewMode: (mode: "trace" | "monitor") => void;
+  setViewTab: (tab: "monitor" | "plot") => void;
+
+  // Recording
   toggleRecording: () => void;
   stopRecording: () => void;
-  
-  // Trace logging actions
+
+  // Trace logging
   startLogging: (filePath: string, format: "csv" | "trc") => Promise<void>;
   stopLogging: () => Promise<void>;
-  
-  // Trace playback actions
+
+  // Trace playback
   loadTrace: (filePath: string) => Promise<number>;
   startPlayback: () => Promise<void>;
   stopPlayback: () => Promise<void>;
   pausePlayback: () => Promise<void>;
   resumePlayback: () => Promise<void>;
   setPlaybackSpeed: (speed: number) => Promise<void>;
-  
-  // DBC actions
-  loadDbc: (channelId: string, filePath: string) => Promise<void>;
-  removeDbc: (channelId: string) => Promise<void>;
-  setSelectedMessage: (message: CanFrame | null) => void;
-  
-  // Multi-channel actions
-  addChannel: () => void;
-  removeChannel: (id: string) => void;
-  setActiveChannel: (id: string) => void;
-  updateChannel: (id: string, updates: Partial<{ name: string; interfaceId: string | null; bitrate: number; dbcFile: string | null }>) => void;
-  connectChannel: (id: string) => Promise<void>;
-  disconnectChannel: (id: string) => Promise<void>;
-  
-  // Filter actions
+
+  // Nets
+  addNet: () => void;
+  removeNet: (id: string) => Promise<void>;
+  updateNet: (id: string, updates: Partial<Omit<Net, "id" | "connectionStatus">>) => void;
+  setActiveNet: (id: string) => void;
+  connectNet: (id: string) => Promise<void>;
+  disconnectNet: (id: string) => Promise<void>;
+  loadSymbolFile: (netId: string, filePath: string) => Promise<void>;
+  removeSymbolFile: (netId: string) => void;
+
+  // Transmit
+  sendFrame: (frame: {
+    id: number;
+    isExtended: boolean;
+    isRemote: boolean;
+    dlc: number;
+    data: number[];
+    channel?: string;
+  }) => Promise<void>;
+  addTransmitRow: (row: Omit<TransmitRow, "id" | "count" | "manualCount" | "paused" | "backendJobId">) => string;
+  updateTransmitRow: (id: string, updates: Partial<Omit<TransmitRow, "id">>) => Promise<void>;
+  removeTransmitRow: (id: string) => Promise<void>;
+  toggleTransmitRowPaused: (id: string) => Promise<void>;
+  sendTransmitRowOnce: (id: string) => Promise<void>;
+  setSelectedTransmitRow: (id: string | null) => void;
+
+  // Filters
   setFilters: (filters: Array<{ type: string; [key: string]: any }>) => void;
-  
-  // Project file actions
+
+  // Project
   saveProject: (filePath: string) => Promise<void>;
   loadProject: (filePath: string) => Promise<void>;
-  
-  // Plot actions
-  setViewTab: (tab: "monitor" | "plot") => void;
+
+  // Plot
   addPlotSignal: (signal: PlotSignal) => void;
   removePlotSignal: (signal: PlotSignal) => void;
   clearPlotData: () => void;
@@ -205,23 +158,37 @@ interface CanState {
 }
 
 // Event listener cleanup
-let unlistenMessage: UnlistenFn | null = null;
+let unlistenBatch: UnlistenFn | null = null;
 let unlistenStats: UnlistenFn | null = null;
+let unlistenInterfaces: UnlistenFn | null = null;
+let unlistenChannelError: UnlistenFn | null = null;
+let txCountTimer: ReturnType<typeof setInterval> | null = null;
 let isInitialized = false;
 
+function rowToFramePayload(row: TransmitRow) {
+  return {
+    id: row.canId,
+    isExtended: row.isExtended,
+    isRemote: row.isRemote,
+    dlc: row.dlc,
+    data: row.data.slice(0, row.dlc),
+    channel: row.netId ?? undefined,
+  };
+}
+
 export const useCanStore = create<CanState>((set, get) => ({
-  // Initial state
-  connectionStatus: "disconnected",
-  selectedInterface: null,
-  selectedBitrate: 500000,
   availableInterfaces: [],
-  channels: [],
-  activeChannel: null,
+  nets: [],
+  activeNetId: null,
   filters: [],
   traceMessages: [],
   monitorMessages: new Map<string, MonitorEntry>(),
   maxMessages: 10000,
   isPaused: false,
+  monitorSort: { key: "id", dir: "asc" },
+  idFilter: "",
+  expandedRows: new Set<string>(),
+  messageNames: new Map<string, Map<number, string>>(),
   isRecording: false,
   recordingStartTime: null,
   isLogging: false,
@@ -231,866 +198,643 @@ export const useCanStore = create<CanState>((set, get) => ({
   playbackSpeed: 1.0,
   loadedTraceFile: null,
   playbackFrameCount: 0,
-  playbackCurrentIndex: 0,
-  loadedDbcFiles: new Map<string, string>(),
-  selectedMessage: null,
-  channelBusStats: new Map<string, BusStats>(),
-  transmitJobs: [],
-  pendingTransmit: {
-    id: 0x100,
-    isExtended: false,
-    isRemote: false,
-    dlc: 8,
-    data: [0, 0, 0, 0, 0, 0, 0, 0],
-  },
-  idFilter: "",
-  showRxOnly: false,
-  showTxOnly: false,
+  busStats: new Map<string, BusStats>(),
+  transmitRows: [],
+  selectedTransmitRowId: null,
   viewMode: "monitor",
-
-  setViewMode: (mode: "trace" | "monitor") => set({ viewMode: mode }),
-
-  // Plot state initialization
   viewTab: "monitor",
   selectedPlotSignals: [],
   plotData: new Map<string, PlotDataPoint[]>(),
   isPlotPaused: false,
-  plotTimeWindow: -1, // -1 = "All", otherwise seconds
+  plotTimeWindow: -1,
   plotMaxDataPoints: 5000,
 
-  // Initialize backend and set up event listeners
   initializeBackend: async () => {
     // Prevent duplicate initialization (React StrictMode calls effects twice)
-    if (isInitialized) {
-      console.log("Backend already initialized, skipping...");
-      return;
-    }
+    if (isInitialized) return;
     isInitialized = true;
 
     try {
-      console.log("Initializing backend...");
-      
-      // Get available interfaces
       const interfaces = await invoke<InterfaceInfo[]>("get_interfaces");
-      console.log("Available interfaces:", interfaces);
       set({ availableInterfaces: interfaces });
 
-      // Select first available interface by default
-      if (interfaces.length > 0) {
-        set({ selectedInterface: interfaces[0].id });
-      }
+      // Hot-plug: the backend re-enumerates every 2s and emits on changes
+      unlistenInterfaces = await listen<InterfaceInfo[]>("interfaces-changed", (event) => {
+        set({ availableInterfaces: event.payload });
+      });
 
-      // Set up event listeners for incoming messages
-      console.log("Setting up can-message listener...");
-      unlistenMessage = await listen<CanFrame>("can-message", async (event) => {
+      // A connected channel died (e.g. device unplugged)
+      unlistenChannelError = await listen<{ channelId: string; error: string }>(
+        "channel-error",
+        (event) => {
+          const { channelId, error } = event.payload;
+          console.warn(`Net ${channelId} failed: ${error}`);
+          set((s) => ({
+            nets: s.nets.map((n) =>
+              n.id === channelId ? { ...n, connectionStatus: "error" } : n
+            ),
+          }));
+        }
+      );
+
+      // Batched frame delivery (~30 Hz): one store update per batch
+      unlistenBatch = await listen<CanFrame[]>("can-message-batch", (event) => {
         const state = get();
         if (state.isPaused) return;
+        const frames = event.payload;
+        if (frames.length === 0) return;
 
-        const newFrame = event.payload;
-        
-        // Check if this is from trace playback (has loadedTraceFile and playback is active)
-        const isTracePlayback = state.loadedTraceFile !== null && 
-                                (state.playbackState === "playing" || state.playbackState === "paused");
-        
-        // Include channel in key so same ID on different channels are separate
-        const monitorKey = `${newFrame.channel}-${newFrame.id}-${newFrame.direction}`;
-        
+        const isTracePlayback =
+          state.loadedTraceFile !== null &&
+          (state.playbackState === "playing" || state.playbackState === "paused");
+        const now = performance.now();
+
         set((s) => {
-          // Only update monitor messages for live CAN data, not trace playback
-          let newMonitorMessages = s.monitorMessages;
+          let newMonitor = s.monitorMessages;
           if (!isTracePlayback) {
-            newMonitorMessages = new Map(s.monitorMessages);
-            const existing = newMonitorMessages.get(monitorKey);
-            
-            let cycleTime = 0;
-            let count = 1;
-            
-            if (existing) {
-              count = existing.count + 1;
-              // Calculate cycle time in ms
-              cycleTime = (newFrame.timestamp - existing.lastTimestamp) * 1000;
+            newMonitor = new Map(s.monitorMessages);
+            for (const frame of frames) {
+              const key = `${frame.channel}-${frame.id}-${frame.direction}`;
+              const existing = newMonitor.get(key);
+              if (existing) {
+                const dtMs = (frame.timestamp - existing.lastTimestamp) * 1000;
+                // EMA smoothing so the display doesn't flicker
+                const cycleTime =
+                  existing.cycleTime > 0 && dtMs > 0
+                    ? existing.cycleTime * 0.8 + dtMs * 0.2
+                    : dtMs > 0
+                      ? dtMs
+                      : existing.cycleTime;
+                const changedAt = existing.changedAt.slice();
+                const prevData = existing.frame.data;
+                for (let i = 0; i < frame.data.length; i++) {
+                  if (prevData[i] !== frame.data[i]) changedAt[i] = now;
+                }
+                newMonitor.set(key, {
+                  frame,
+                  count: existing.count + 1,
+                  cycleTime,
+                  lastTimestamp: frame.timestamp,
+                  changedAt,
+                });
+              } else {
+                newMonitor.set(key, {
+                  frame,
+                  count: 1,
+                  cycleTime: 0,
+                  lastTimestamp: frame.timestamp,
+                  changedAt: new Array(8).fill(0),
+                });
+              }
             }
-            
-            newMonitorMessages.set(monitorKey, {
-              frame: newFrame,
-              count,
-              cycleTime,
-              lastTimestamp: newFrame.timestamp,
-            });
           }
-          
-          // Only append to trace if recording is active (live data only, not trace playback)
-          let newTraceMessages = s.traceMessages;
-          let newRecordingStartTime = s.recordingStartTime;
-          
+
+          let newTrace = s.traceMessages;
+          let newStart = s.recordingStartTime;
           if (s.isRecording && !isTracePlayback) {
-            // Live recording: If this is the first message after starting recording, use its timestamp as reference
-            if (newRecordingStartTime === null) {
-              newRecordingStartTime = newFrame.timestamp;
-            }
-            // Calculate relative timestamp
-            const relativeTimestamp = newFrame.timestamp - newRecordingStartTime;
-            const frameWithRelativeTime = { ...newFrame, timestamp: relativeTimestamp };
-            newTraceMessages = [...s.traceMessages, frameWithRelativeTime].slice(-s.maxMessages);
+            if (newStart === null) newStart = frames[0].timestamp;
+            const base = newStart;
+            const rebased = frames.map((f) => ({ ...f, timestamp: f.timestamp - base }));
+            newTrace = [...s.traceMessages, ...rebased].slice(-s.maxMessages);
           }
-          // Note: Trace playback messages are already loaded into traceMessages, so we don't add them again
-          
+
           return {
-            traceMessages: newTraceMessages,
-            monitorMessages: newMonitorMessages,
-            recordingStartTime: newRecordingStartTime,
+            monitorMessages: newMonitor,
+            traceMessages: newTrace,
+            recordingStartTime: newStart,
           };
         });
 
-        // Decode signals for plot if not paused and signals are selected
-        // Skip real-time updates during trace playback (data is loaded all at once, not incrementally)
-        const currentState = get();
-        
-        if (!currentState.isPlotPaused && currentState.selectedPlotSignals.length > 0 && !isTracePlayback) {
-          // Find signals that match this message
-          const matchingSignals = currentState.selectedPlotSignals.filter(
-            (sig) => sig.channelId === newFrame.channel && sig.messageId === newFrame.id
+        // Plot decoding: one batched invoke per flush
+        const st = get();
+        if (!st.isPlotPaused && st.selectedPlotSignals.length > 0 && !isTracePlayback) {
+          const wanted = new Set(
+            st.selectedPlotSignals.map((sig) => `${sig.channelId}-${sig.messageId}`)
           );
-
-          if (matchingSignals.length > 0) {
-            if (!currentState.loadedDbcFiles.has(newFrame.channel)) {
-              // No DBC loaded for this channel, skip
-            } else {
-              // Decode all signals for this message
-              invoke<Array<{ name: string; physicalValue: number }>>("decode_message", {
-                channelId: newFrame.channel,
-                messageId: newFrame.id,
-                data: newFrame.data,
-              })
-                .then((decodedSignals) => {
-                  const state = get();
-                  const newPlotData = new Map(state.plotData);
-                  const currentTime = newFrame.timestamp;
-                  const timeWindow = state.plotTimeWindow;
-                  const maxPoints = state.plotMaxDataPoints;
-
-                  // Update data for each matching signal
-                  for (const signal of matchingSignals) {
-                    const decoded = decodedSignals.find((s) => s.name === signal.signalName);
-                    if (decoded) {
-                      const key = `${signal.channelId}-${signal.messageId}-${signal.signalName}`;
-                      let dataPoints = newPlotData.get(key) || [];
-
-                      // Add new data point
-                      dataPoints.push({ time: currentTime, value: decoded.physicalValue });
-
-                      // Remove points outside time window
-                      const cutoffTime = currentTime - timeWindow;
-                      dataPoints = dataPoints.filter((pt) => pt.time >= cutoffTime);
-
-                      // Trim to max points (keep most recent)
-                      if (dataPoints.length > maxPoints) {
-                        dataPoints = dataPoints.slice(-maxPoints);
+          const matchingFrames = frames.filter((f) => wanted.has(`${f.channel}-${f.id}`));
+          if (matchingFrames.length > 0) {
+            const requests = matchingFrames.map((f) => ({
+              channelId: f.channel,
+              messageId: f.id,
+              data: f.data,
+            }));
+            invoke<DecodedSignal[][]>("decode_messages_batch", { requests })
+              .then((results) => {
+                set((s) => {
+                  const newPlotData = new Map(s.plotData);
+                  const timeWindow = s.plotTimeWindow;
+                  const maxPoints = s.plotMaxDataPoints;
+                  results.forEach((decoded, i) => {
+                    const frame = matchingFrames[i];
+                    for (const sig of s.selectedPlotSignals) {
+                      if (sig.channelId !== frame.channel || sig.messageId !== frame.id) continue;
+                      const d = decoded.find((x) => x.name === sig.signalName);
+                      if (!d) continue;
+                      const key = `${sig.channelId}-${sig.messageId}-${sig.signalName}`;
+                      let points = newPlotData.get(key) ?? [];
+                      points = [...points, { time: frame.timestamp, value: d.physicalValue }];
+                      if (timeWindow > 0) {
+                        const cutoff = frame.timestamp - timeWindow;
+                        points = points.filter((pt) => pt.time >= cutoff);
                       }
-
-                      newPlotData.set(key, dataPoints);
+                      if (points.length > maxPoints) points = points.slice(-maxPoints);
+                      newPlotData.set(key, points);
                     }
-                    // Signal not found in decoded signals, skip
-                  }
-
-                  set({ plotData: newPlotData });
-                })
-                .catch((_error) => {
-                  // Failed to decode signals, skip this message
+                  });
+                  return { plotData: newPlotData };
                 });
-            }
-          } else {
-            // Message doesn't match any selected signals, skip
+              })
+              .catch(() => {
+                // Decoding failed (no symbol file?) — skip silently
+              });
           }
         }
       });
-      console.log("can-message listener set up");
 
-      // Set up event listeners for bus statistics
-      unlistenStats = await listen<{ channelId: string; busLoad: number; txCount: number; rxCount: number; errorCount: number; txErrorCounter: number; rxErrorCounter: number }>("bus-stats", (event) => {
-        const stats = event.payload;
+      // Per-net bus statistics
+      unlistenStats = await listen<BusStats & { channelId: string }>("bus-stats", (event) => {
+        const { channelId, ...stats } = event.payload;
         set((s) => {
-          const newStats = new Map(s.channelBusStats);
-          newStats.set(stats.channelId, {
-            busLoad: stats.busLoad,
-            txCount: stats.txCount,
-            rxCount: stats.rxCount,
-            errorCount: stats.errorCount,
-            txErrorCounter: stats.txErrorCounter,
-            rxErrorCounter: stats.rxErrorCounter,
-          });
-          return { channelBusStats: newStats };
+          const newStats = new Map(s.busStats);
+          newStats.set(channelId, stats);
+          return { busStats: newStats };
         });
       });
-      
-      console.log("Backend initialized successfully");
+
+      // Poll cyclic transmit counts while jobs run
+      txCountTimer = setInterval(async () => {
+        const rows = get().transmitRows;
+        if (!rows.some((r) => r.backendJobId)) return;
+        try {
+          const counts = await invoke<Record<string, u64Number>>("get_periodic_tx_counts");
+          set((s) => ({
+            transmitRows: s.transmitRows.map((r) =>
+              r.backendJobId && counts[r.backendJobId] !== undefined
+                ? { ...r, count: r.manualCount + counts[r.backendJobId] }
+                : r
+            ),
+          }));
+        } catch {
+          // ignore
+        }
+      }, 500);
     } catch (error) {
       console.error("Failed to initialize backend:", error);
       isInitialized = false; // Allow retry on error
     }
   },
 
-  // Connect to selected interface
-  connect: async () => {
-    const { selectedInterface, selectedBitrate } = get();
-    if (!selectedInterface) return;
+  clearMessages: () =>
+    set({
+      traceMessages: [],
+      monitorMessages: new Map<string, MonitorEntry>(),
+      expandedRows: new Set<string>(),
+    }),
 
-    set({ connectionStatus: "connecting" });
-
-    try {
-      await invoke("connect", {
-        interfaceId: selectedInterface,
-        bitrate: selectedBitrate,
-      });
-      set({ connectionStatus: "connected" });
-    } catch (error) {
-      console.error("Failed to connect:", error);
-      set({ connectionStatus: "error" });
-    }
-  },
-
-  // Disconnect from interface
-  disconnect: async () => {
-    try {
-      await invoke("disconnect");
-      set({ connectionStatus: "disconnected" });
-    } catch (error) {
-      console.error("Failed to disconnect:", error);
-    }
-  },
-
-  setSelectedInterface: (id: string) => set({ selectedInterface: id }),
-  setSelectedBitrate: (bitrate: number) => set({ selectedBitrate: bitrate }),
-
-  // Send a CAN message
-  sendMessage: async (frame: Partial<CanFrame>) => {
-    const { channels } = get();
-    // Check if the specified channel (or any channel) is connected
-    const channelId = frame.channel;
-    const channel = channelId ? channels.find(c => c.id === channelId) : null;
-    
-    if (channelId && channel && channel.connectionStatus !== "connected") {
-      console.log("Channel not connected, skipping send");
-      return;
-    }
-    
-    // If no channel specified, check if any channel is connected
-    if (!channelId) {
-      const hasConnected = channels.some(c => c.connectionStatus === "connected");
-      if (!hasConnected) {
-        console.log("No connected channels, skipping send");
-        return;
-      }
-    }
-
-    try {
-      console.log("Invoking send_message command...");
-      await invoke("send_message", { frame });
-      console.log("send_message command completed");
-    } catch (error) {
-      console.error("Failed to send message:", error);
-    }
-  },
-
-  clearMessages: () => set({ 
-    traceMessages: [], 
-    monitorMessages: new Map<string, MonitorEntry>() 
-  }),
-  
-  getDisplayMessages: () => {
-    const state = get();
-    if (state.viewMode === "monitor") {
-      // Return monitor entries sorted by ID
-      // Monitor mode doesn't use traceMessages, so we can skip that dependency
-      return Array.from(state.monitorMessages.values()).sort((a, b) => a.frame.id - b.frame.id);
-    } else {
-      // Return all trace messages wrapped as MonitorEntry for consistent interface
-      // Limit to maxMessages to prevent performance issues with very large traces
-      const maxTraceMessages = state.maxMessages;
-      const messagesToShow = state.traceMessages.length > maxTraceMessages
-        ? state.traceMessages.slice(-maxTraceMessages)
-        : state.traceMessages;
-      
-      return messagesToShow.map(frame => ({
-        frame,
-        count: 0,
-        cycleTime: 0,
-        lastTimestamp: frame.timestamp,
-      }));
-    }
-  },
   togglePause: () => set((s) => ({ isPaused: !s.isPaused })),
-  setPendingTransmit: (frame: Partial<CanFrame>) =>
+  setIdFilter: (filter: string) => set({ idFilter: filter }),
+  setMonitorSort: (sort) => set({ monitorSort: sort }),
+  toggleRowExpanded: (key: string) =>
+    set((s) => {
+      const next = new Set(s.expandedRows);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return { expandedRows: next };
+    }),
+  setViewMode: (mode) => set({ viewMode: mode }),
+  setViewTab: (tab) => set({ viewTab: tab }),
+
+  toggleRecording: () => {
+    const state = get();
+    if (state.isRecording) {
+      set({ isRecording: false, recordingStartTime: null });
+    } else {
+      set({ isRecording: true, recordingStartTime: null, traceMessages: [] });
+    }
+  },
+
+  stopRecording: () => set({ isRecording: false, recordingStartTime: null }),
+
+  startLogging: async (filePath, format) => {
+    await invoke("start_logging", { filePath, format });
+    set({ isLogging: true, logFilePath: filePath, logFormat: format });
+  },
+
+  stopLogging: async () => {
+    await invoke("stop_logging");
+    set({ isLogging: false, logFilePath: null });
+  },
+
+  loadTrace: async (filePath: string) => {
+    const state = get();
+    // Map TRC bus numbers to nets: bus N -> Nth net (by name number when present)
+    const busToChannelNameMap: Record<string, string> = {};
+    const channelNameToIdMap: Record<string, string> = {};
+    state.nets.forEach((net, index) => {
+      channelNameToIdMap[net.name] = net.id;
+      const match = net.name.match(/\d+/);
+      const busNum = match ? parseInt(match[0], 10) : index + 1;
+      if (busNum > 0 && busNum <= 255) busToChannelNameMap[busNum.toString()] = net.name;
+    });
+
+    const count = await invoke<number>("load_trace", {
+      filePath,
+      busToChannelMap:
+        Object.keys(busToChannelNameMap).length > 0 ? busToChannelNameMap : undefined,
+      channelNameToIdMap:
+        Object.keys(channelNameToIdMap).length > 0 ? channelNameToIdMap : undefined,
+    });
+
+    const allFrames = await invoke<CanFrame[]>("get_trace_frames");
+    const firstTimestamp = allFrames.length > 0 ? allFrames[0].timestamp : 0;
+    const traceFrames = allFrames.map((frame) => ({
+      ...frame,
+      timestamp: frame.timestamp - firstTimestamp,
+    }));
+
+    set({
+      loadedTraceFile: filePath,
+      playbackFrameCount: count,
+      traceMessages: traceFrames,
+    });
+    return count;
+  },
+
+  startPlayback: async () => {
+    await invoke("start_playback");
+    set({ playbackState: "playing" });
+  },
+
+  stopPlayback: async () => {
+    await invoke("stop_playback");
+    set({ playbackState: "stopped" });
+  },
+
+  pausePlayback: async () => {
+    await invoke("pause_playback");
+    set({ playbackState: "paused" });
+  },
+
+  resumePlayback: async () => {
+    await invoke("resume_playback");
+    set({ playbackState: "playing" });
+  },
+
+  setPlaybackSpeed: async (speed: number) => {
+    await invoke("set_playback_speed", { speed });
+    set({ playbackSpeed: speed });
+  },
+
+  // --- Nets ---
+
+  addNet: () => {
+    const id = `net_${Date.now()}`;
     set((s) => ({
-      pendingTransmit: { ...s.pendingTransmit, ...frame },
+      nets: [
+        ...s.nets,
+        {
+          id,
+          name: `Net ${s.nets.length + 1}`,
+          bitrate: 500000,
+          assignedDeviceId: null,
+          symbolFilePath: null,
+          connectionStatus: "disconnected",
+        },
+      ],
+      activeNetId: s.activeNetId ?? id,
+    }));
+  },
+
+  removeNet: async (id: string) => {
+    const net = get().nets.find((n) => n.id === id);
+    if (net && net.connectionStatus === "connected") {
+      await get().disconnectNet(id);
+    }
+    set((s) => {
+      const nets = s.nets.filter((n) => n.id !== id);
+      return {
+        nets,
+        activeNetId:
+          s.activeNetId === id ? (nets.length > 0 ? nets[0].id : null) : s.activeNetId,
+      };
+    });
+  },
+
+  updateNet: (id, updates) =>
+    set((s) => ({
+      nets: s.nets.map((n) => (n.id === id ? { ...n, ...updates } : n)),
     })),
 
-  addTransmitJob: (job: Omit<TransmitJob, "id">) => {
-    const id = crypto.randomUUID();
+  setActiveNet: (id: string) => set({ activeNetId: id }),
+
+  connectNet: async (id: string) => {
+    const net = get().nets.find((n) => n.id === id);
+    if (!net || !net.assignedDeviceId) return;
+
     set((s) => ({
-      transmitJobs: [...s.transmitJobs, { ...job, id }],
+      nets: s.nets.map((n) => (n.id === id ? { ...n, connectionStatus: "connecting" } : n)),
+    }));
+
+    try {
+      await invoke("connect_channel", {
+        channelId: id,
+        interfaceId: net.assignedDeviceId,
+        bitrate: net.bitrate,
+      });
+      set((s) => ({
+        nets: s.nets.map((n) => (n.id === id ? { ...n, connectionStatus: "connected" } : n)),
+      }));
+    } catch (error) {
+      console.error("Failed to connect net:", error);
+      set((s) => ({
+        nets: s.nets.map((n) => (n.id === id ? { ...n, connectionStatus: "error" } : n)),
+      }));
+      throw error;
+    }
+  },
+
+  disconnectNet: async (id: string) => {
+    try {
+      await invoke("disconnect_channel", { channelId: id });
+    } catch (error) {
+      console.error("Failed to disconnect net:", error);
+    }
+    set((s) => ({
+      nets: s.nets.map((n) => (n.id === id ? { ...n, connectionStatus: "disconnected" } : n)),
     }));
   },
 
-  updateTransmitJob: async (id: string, job: Omit<TransmitJob, "id">) => {
-    const existingJob = get().transmitJobs.find((j) => j.id === id);
-    if (!existingJob) return;
+  loadSymbolFile: async (netId: string, filePath: string) => {
+    await invoke("load_dbc", { channelId: netId, filePath });
+    const names = await invoke<Record<string, string>>("get_message_names", {
+      channelId: netId,
+    });
+    set((s) => {
+      const nameMap = new Map<number, string>();
+      for (const [idStr, name] of Object.entries(names)) {
+        nameMap.set(Number(idStr), name);
+      }
+      const newNames = new Map(s.messageNames);
+      newNames.set(netId, nameMap);
+      return {
+        messageNames: newNames,
+        nets: s.nets.map((n) => (n.id === netId ? { ...n, symbolFilePath: filePath } : n)),
+      };
+    });
+  },
 
-    // If the job is currently enabled, stop it first
-    if (existingJob.enabled && existingJob.backendJobId) {
-      try {
-        await invoke("stop_periodic_transmit", { jobId: existingJob.backendJobId });
-      } catch (e) {
-        console.error("Failed to stop periodic transmit for update:", e);
+  removeSymbolFile: (netId: string) =>
+    set((s) => {
+      const newNames = new Map(s.messageNames);
+      newNames.delete(netId);
+      return {
+        messageNames: newNames,
+        nets: s.nets.map((n) => (n.id === netId ? { ...n, symbolFilePath: null } : n)),
+      };
+    }),
+
+  // --- Transmit ---
+
+  sendFrame: async (frame) => {
+    await invoke("send_message", { frame });
+  },
+
+  addTransmitRow: (row) => {
+    const id = crypto.randomUUID();
+    set((s) => ({
+      transmitRows: [
+        ...s.transmitRows,
+        { ...row, id, paused: true, count: 0, manualCount: 0 },
+      ],
+      selectedTransmitRowId: id,
+    }));
+    return id;
+  },
+
+  updateTransmitRow: async (id, updates) => {
+    const row = get().transmitRows.find((r) => r.id === id);
+    if (!row) return;
+    const merged = { ...row, ...updates };
+
+    if (row.backendJobId) {
+      const cycleChanged = updates.cycleMs !== undefined && updates.cycleMs !== row.cycleMs;
+      const netChanged = updates.netId !== undefined && updates.netId !== row.netId;
+      if (cycleChanged || netChanged || merged.cycleMs <= 0) {
+        // Interval/target changes restart the job
+        try {
+          await invoke("stop_periodic_transmit", { jobId: row.backendJobId });
+        } catch (e) {
+          console.error("Failed to stop periodic transmit:", e);
+        }
+        merged.backendJobId = undefined;
+        if (merged.cycleMs > 0 && !merged.paused) {
+          try {
+            merged.backendJobId = await invoke<string>("start_periodic_transmit", {
+              frame: rowToFramePayload(merged),
+              intervalMs: merged.cycleMs,
+            });
+          } catch (e) {
+            console.error("Failed to restart periodic transmit:", e);
+            merged.paused = true;
+          }
+        }
+      } else {
+        // Data-only edit: update the running job in place (no glitch)
+        try {
+          await invoke("update_periodic_transmit", {
+            jobId: row.backendJobId,
+            frame: rowToFramePayload(merged),
+          });
+        } catch (e) {
+          console.error("Failed to update periodic transmit:", e);
+        }
       }
     }
 
-    // Update the job
     set((s) => ({
-      transmitJobs: s.transmitJobs.map((j) =>
-        j.id === id ? { ...job, id, enabled: false, backendJobId: undefined } : j
-      ),
+      transmitRows: s.transmitRows.map((r) => (r.id === id ? merged : r)),
     }));
   },
 
-  removeTransmitJob: async (id: string) => {
-    // Stop the job on backend if running
-    const job = get().transmitJobs.find((j) => j.id === id);
-    if (job?.enabled && job.backendJobId) {
+  removeTransmitRow: async (id: string) => {
+    const row = get().transmitRows.find((r) => r.id === id);
+    if (row?.backendJobId) {
       try {
-        await invoke("stop_periodic_transmit", { jobId: job.backendJobId });
+        await invoke("stop_periodic_transmit", { jobId: row.backendJobId });
       } catch (e) {
         console.error("Failed to stop periodic transmit:", e);
       }
     }
     set((s) => ({
-      transmitJobs: s.transmitJobs.filter((j) => j.id !== id),
+      transmitRows: s.transmitRows.filter((r) => r.id !== id),
+      selectedTransmitRowId: s.selectedTransmitRowId === id ? null : s.selectedTransmitRowId,
     }));
   },
 
-  toggleTransmitJob: async (id: string) => {
-    const job = get().transmitJobs.find((j) => j.id === id);
-    if (!job) return;
+  toggleTransmitRowPaused: async (id: string) => {
+    const row = get().transmitRows.find((r) => r.id === id);
+    if (!row || row.cycleMs <= 0) return;
 
-    const newEnabled = !job.enabled;
-    
-    try {
-      if (newEnabled) {
-        // Start periodic transmit on backend
-        const frame = {
-          id: job.frame.id,
-          isExtended: job.frame.isExtended,
-          isRemote: job.frame.isRemote,
-          dlc: job.frame.dlc,
-          data: job.frame.data,
-          channel: job.frame.channel || undefined,
-        };
-        // Backend returns the actual job ID we need to use for stopping
-        const backendJobId = await invoke<string>("start_periodic_transmit", { 
-          frame, 
-          intervalMs: job.intervalMs 
-        });
-        
-        // Update the job with the backend ID and enabled state
-        set((s) => ({
-          transmitJobs: s.transmitJobs.map((j) =>
-            j.id === id ? { ...j, enabled: true, backendJobId } : j
-          ),
-        }));
-      } else {
-        // Stop periodic transmit using the backend job ID
-        if (job.backendJobId) {
-          await invoke("stop_periodic_transmit", { jobId: job.backendJobId });
-        }
-        
-        set((s) => ({
-          transmitJobs: s.transmitJobs.map((j) =>
-            j.id === id ? { ...j, enabled: false, backendJobId: undefined } : j
-          ),
-        }));
-      }
-    } catch (e) {
-      console.error("Failed to toggle periodic transmit:", e);
-    }
-  },
-
-  setIdFilter: (filter: string) => set({ idFilter: filter }),
-  
-  toggleRecording: () => {
-    const state = get();
-    if (state.isRecording) {
-      // Stop recording
-      set({ isRecording: false, recordingStartTime: null });
-    } else {
-      // Start recording - clear existing trace
-      // recordingStartTime will be set to the first message's timestamp when it arrives
-      set({ 
-        isRecording: true, 
-        recordingStartTime: null,
-        traceMessages: [] // Clear existing trace when starting new recording
-      });
-    }
-  },
-  
-  stopRecording: () => set({ isRecording: false, recordingStartTime: null }),
-  
-  // Trace logging actions
-  startLogging: async (filePath: string, format: "csv" | "trc") => {
-    try {
-      await invoke("start_logging", { filePath, format });
-      set({ isLogging: true, logFilePath: filePath, logFormat: format });
-    } catch (error) {
-      console.error("Failed to start logging:", error);
-      throw error;
-    }
-  },
-  
-  stopLogging: async () => {
-    try {
-      await invoke("stop_logging");
-      set({ isLogging: false, logFilePath: null });
-    } catch (error) {
-      console.error("Failed to stop logging:", error);
-      throw error;
-    }
-  },
-  
-  // Trace playback actions
-  loadTrace: async (filePath: string) => {
-    try {
-      // Build bus-to-channel mapping based on channel numbers
-      // Extract channel number from channel name (e.g., "Channel 3" -> bus 3)
-      // Use channel NAMES (not IDs) for the mapping as requested
-      const state = get();
-      const busToChannelNameMap = new Map<number, string>();
-      const channelNameToIdMap = new Map<string, string>();
-      
-      for (const channel of state.channels) {
-        // Store name -> ID mapping for backend resolution
-        channelNameToIdMap.set(channel.name, channel.id);
-        
-        // Extract number from channel name (e.g., "Channel 3" -> 3)
-        const match = channel.name.match(/\d+/);
-        if (match) {
-          const busNum = parseInt(match[0], 10);
-          if (busNum > 0 && busNum <= 255) {
-            // Map bus number to channel NAME (not ID)
-            busToChannelNameMap.set(busNum, channel.name);
-          }
-        }
-      }
-      
-      // Convert Maps to objects for Tauri
-      const busToNameObj: Record<string, string> = {};
-      busToChannelNameMap.forEach((channelName, busNum) => {
-        busToNameObj[busNum.toString()] = channelName;
-      });
-      
-      const nameToIdObj: Record<string, string> = {};
-      channelNameToIdMap.forEach((channelId, channelName) => {
-        nameToIdObj[channelName] = channelId;
-      });
-      
-      let count: number;
+    if (row.backendJobId) {
+      // Running -> pause
       try {
-        count = await invoke<number>("load_trace", { 
-          filePath,
-          busToChannelMap: Object.keys(busToNameObj).length > 0 ? busToNameObj : undefined,
-          channelNameToIdMap: Object.keys(nameToIdObj).length > 0 ? nameToIdObj : undefined
+        await invoke("stop_periodic_transmit", { jobId: row.backendJobId });
+      } catch (e) {
+        console.error("Failed to stop periodic transmit:", e);
+      }
+      set((s) => ({
+        transmitRows: s.transmitRows.map((r) =>
+          r.id === id ? { ...r, paused: true, backendJobId: undefined } : r
+        ),
+      }));
+    } else {
+      // Paused -> run (needs a connected net)
+      const net = get().nets.find((n) => n.id === row.netId);
+      if (!net || net.connectionStatus !== "connected") {
+        console.warn("Cannot start cyclic transmit: net not connected");
+        return;
+      }
+      try {
+        const backendJobId = await invoke<string>("start_periodic_transmit", {
+          frame: rowToFramePayload(row),
+          intervalMs: row.cycleMs,
         });
-        // Trace loaded
-      } catch (error) {
-        console.error("Failed to invoke load_trace:", error);
-        throw error;
+        set((s) => ({
+          transmitRows: s.transmitRows.map((r) =>
+            r.id === id ? { ...r, paused: false, backendJobId } : r
+          ),
+        }));
+      } catch (e) {
+        console.error("Failed to start periodic transmit:", e);
       }
-      
-      if (count === undefined || count === null || isNaN(count)) {
-        throw new Error(`load_trace returned invalid count: ${count}`);
-      }
-      
-      // Load all frames directly into traceMessages (fast, bypasses event listener)
-      const allFrames = await invoke<CanFrame[]>("get_trace_frames");
-      
-      // Calculate relative timestamps (first frame = 0)
-      const firstTimestamp = allFrames.length > 0 ? allFrames[0].timestamp : 0;
-      const traceFrames = allFrames.map(frame => ({
-        ...frame,
-        timestamp: frame.timestamp - firstTimestamp
-      }));
-      
-      set({ 
-        loadedTraceFile: filePath, 
-        playbackFrameCount: count, 
-        playbackCurrentIndex: 0,
-        traceMessages: traceFrames, // Load directly into trace tab, not monitor
-      });
-      
-      return count;
-    } catch (error) {
-      console.error("Failed to load trace:", error);
-      throw error;
     }
   },
-  
-  startPlayback: async () => {
+
+  sendTransmitRowOnce: async (id: string) => {
+    const row = get().transmitRows.find((r) => r.id === id);
+    if (!row) return;
+    const net = get().nets.find((n) => n.id === row.netId);
+    if (!net || net.connectionStatus !== "connected") return;
     try {
-      await invoke("start_playback");
-      set({ playbackState: "playing" });
-    } catch (error) {
-      console.error("Failed to start playback:", error);
-      throw error;
-    }
-  },
-  
-  stopPlayback: async () => {
-    try {
-      await invoke("stop_playback");
-      set({ playbackState: "stopped", playbackCurrentIndex: 0 });
-    } catch (error) {
-      console.error("Failed to stop playback:", error);
-      throw error;
-    }
-  },
-  
-  pausePlayback: async () => {
-    try {
-      await invoke("pause_playback");
-      set({ playbackState: "paused" });
-    } catch (error) {
-      console.error("Failed to pause playback:", error);
-      throw error;
-    }
-  },
-  
-  resumePlayback: async () => {
-    try {
-      await invoke("resume_playback");
-      set({ playbackState: "playing" });
-    } catch (error) {
-      console.error("Failed to resume playback:", error);
-      throw error;
-    }
-  },
-  
-  setPlaybackSpeed: async (speed: number) => {
-    try {
-      await invoke("set_playback_speed", { speed });
-      set({ playbackSpeed: speed });
-    } catch (error) {
-      console.error("Failed to set playback speed:", error);
-      throw error;
-    }
-  },
-  
-  // DBC actions
-  loadDbc: async (channelId: string, filePath: string) => {
-    try {
-      await invoke("load_dbc", { channelId, filePath });
-      set((s) => {
-        const newMap = new Map(s.loadedDbcFiles);
-        newMap.set(channelId, filePath);
-        // Also update the channel's dbcFile field for consistency
-        const updatedChannels = s.channels.map(ch =>
-          ch.id === channelId ? { ...ch, dbcFile: filePath } : ch
-        );
-        return { 
-          loadedDbcFiles: newMap,
-          channels: updatedChannels,
-        };
-      });
-    } catch (error) {
-      console.error("Failed to load DBC:", error);
-      throw error;
-    }
-  },
-  
-  removeDbc: async (channelId: string) => {
-    try {
-      // Note: Backend doesn't have remove_dbc command yet, but we can clear from frontend
-      set((s) => {
-        const newMap = new Map(s.loadedDbcFiles);
-        newMap.delete(channelId);
-        // Also clear the channel's dbcFile field
-        const updatedChannels = s.channels.map(ch =>
-          ch.id === channelId ? { ...ch, dbcFile: null } : ch
-        );
-        return { 
-          loadedDbcFiles: newMap,
-          channels: updatedChannels,
-        };
-      });
-    } catch (error) {
-      console.error("Failed to remove DBC:", error);
-      throw error;
-    }
-  },
-  
-  setSelectedMessage: (message) => set({ selectedMessage: message }),
-  
-  // Multi-channel actions
-  addChannel: () => {
-    const id = `channel_${Date.now()}`;
-    const name = `Channel ${get().channels.length + 1}`;
-    set((s) => ({
-      channels: [...s.channels, { 
-        id, 
-        name,
-        interfaceId: null,
-        bitrate: 500000,
-        dbcFile: null,
-        connectionStatus: "disconnected",
-      }],
-      activeChannel: s.activeChannel || id,
-    }));
-  },
-  
-  removeChannel: async (id: string) => {
-    const channel = get().channels.find((c) => c.id === id);
-    if (channel && channel.connectionStatus === "connected") {
-      await get().disconnectChannel(id);
-    }
-    set((s) => {
-      const newChannels = s.channels.filter((c) => c.id !== id);
-      const newActiveChannel =
-        s.activeChannel === id
-          ? newChannels.length > 0
-            ? newChannels[0].id
-            : null
-          : s.activeChannel;
-      return {
-        channels: newChannels,
-        activeChannel: newActiveChannel,
-      };
-    });
-  },
-  
-  setActiveChannel: (id) => set({ activeChannel: id }),
-  
-  updateChannel: (id: string, updates) => {
-    set((s) => ({
-      channels: s.channels.map((c) =>
-        c.id === id ? { ...c, ...updates } : c
-      ),
-    }));
-  },
-  
-  connectChannel: async (id: string) => {
-    const channel = get().channels.find((c) => c.id === id);
-    if (!channel || !channel.interfaceId) return;
-    
-    set((s) => ({
-      channels: s.channels.map((c) =>
-        c.id === id ? { ...c, connectionStatus: "connecting" } : c
-      ),
-    }));
-    
-    try {
-      await invoke("connect_channel", {
-        channelId: id,
-        interfaceId: channel.interfaceId,
-        bitrate: channel.bitrate,
-      });
+      await invoke("send_message", { frame: rowToFramePayload(row) });
       set((s) => ({
-        channels: s.channels.map((c) =>
-          c.id === id ? { ...c, connectionStatus: "connected" } : c
+        transmitRows: s.transmitRows.map((r) =>
+          r.id === id
+            ? { ...r, manualCount: r.manualCount + 1, count: r.count + 1 }
+            : r
         ),
       }));
-    } catch (error) {
-      console.error("Failed to connect channel:", error);
-      set((s) => ({
-        channels: s.channels.map((c) =>
-          c.id === id ? { ...c, connectionStatus: "error" } : c
-        ),
-      }));
+    } catch (e) {
+      console.error("Failed to send frame:", e);
     }
   },
-  
-  disconnectChannel: async (id: string) => {
-    try {
-      await invoke("disconnect_channel", { channelId: id });
-      set((s) => ({
-        channels: s.channels.map((c) =>
-          c.id === id ? { ...c, connectionStatus: "disconnected" } : c
-        ),
-      }));
-    } catch (error) {
-      console.error("Failed to disconnect channel:", error);
-      set((s) => ({
-        channels: s.channels.map((c) =>
-          c.id === id ? { ...c, connectionStatus: "error" } : c
-        ),
-      }));
-    }
-  },
-  
-  // Filter actions
+
+  setSelectedTransmitRow: (id) => set({ selectedTransmitRowId: id }),
+
   setFilters: (filters) => set({ filters }),
-  
-  // Project file actions
+
+  // --- Project ---
+
   saveProject: async (filePath: string) => {
     const state = get();
-    
-    // Convert channels to project format
-    // Use loadedDbcFiles Map to get the actual DBC file path
-    const projectChannels = state.channels.map(ch => ({
-      id: ch.id,
-      name: ch.name,
-      interfaceId: ch.interfaceId,
-      bitrate: ch.bitrate,
-      dbcFile: state.loadedDbcFiles.get(ch.id) || ch.dbcFile || null,
+    const nets: ProjectNet[] = state.nets.map((n) => ({
+      id: n.id,
+      name: n.name,
+      bitrate: n.bitrate,
+      assignedDeviceId: n.assignedDeviceId,
+      symbolFilePath: n.symbolFilePath,
+      comment: n.comment ?? null,
     }));
-    
-    // Convert filters to project format
-    const projectFilters = state.filters.map(f => ({ data: f }));
-    
-    // Convert transmit jobs to project format (exclude backendJobId)
-    const projectTransmitJobs = state.transmitJobs.map(job => ({
-      id: job.id,
-      frame: {
-        id: job.frame.id,
-        isExtended: job.frame.isExtended,
-        isRemote: job.frame.isRemote,
-        dlc: job.frame.dlc,
-        data: job.frame.data,
-        channel: job.frame.channel || undefined,
-      },
-      intervalMs: job.intervalMs,
-      enabled: false, // Always save as disabled
+    const filters = state.filters.map((f) => ({ data: f }));
+    const transmitRows: ProjectTransmitRow[] = state.transmitRows.map((r) => ({
+      id: r.id,
+      name: r.name,
+      comment: r.comment,
+      netId: r.netId,
+      canId: r.canId,
+      isExtended: r.isExtended,
+      isRemote: r.isRemote,
+      dlc: r.dlc,
+      data: r.data,
+      cycleMs: r.cycleMs,
+      signalValues: r.signalValues ?? null,
     }));
-    
-    try {
-      await invoke("save_project", {
-        filePath,
-        channels: projectChannels,
-        filters: projectFilters,
-        transmitJobs: projectTransmitJobs,
-      });
-      console.log("Project saved successfully");
-    } catch (error) {
-      console.error("Failed to save project:", error);
-      throw error;
-    }
+
+    await invoke("save_project", { filePath, nets, filters, transmitRows });
   },
-  
+
   loadProject: async (filePath: string) => {
-    try {
-      const project = await invoke<{
-        version: string;
-        channels: Array<{
-          id: string;
-          name: string;
-          interfaceId: string | null;
-          bitrate: number;
-          dbcFile: string | null;
-        }>;
-        filters: Array<{ data: any }>;
-        transmitJobs: Array<{
-          id: string;
-          frame: {
-            id: number;
-            isExtended: boolean;
-            isRemote: boolean;
-            dlc: number;
-            data: number[];
-            channel?: string;
-          };
-          intervalMs: number;
-          enabled: boolean;
-        }>;
-      }>("load_project", { filePath });
-      
-      // Restore channels
-      const restoredChannels = project.channels.map(ch => ({
-        id: ch.id,
-        name: ch.name,
-        interfaceId: ch.interfaceId,
-        bitrate: ch.bitrate,
-        dbcFile: ch.dbcFile,
-        connectionStatus: "disconnected" as ConnectionStatus,
-      }));
-      
-      // Restore filters
-      const restoredFilters = project.filters.map(f => f.data);
-      
-      // Restore transmit jobs (all disabled on load)
-      const restoredTransmitJobs = project.transmitJobs.map(job => ({
-        id: job.id,
-        frame: {
-          id: job.frame.id,
-          isExtended: job.frame.isExtended,
-          isRemote: job.frame.isRemote,
-          dlc: job.frame.dlc,
-          data: job.frame.data,
-          timestamp: 0,
-          channel: job.frame.channel || "",
-          direction: "tx" as const,
-        },
-        intervalMs: job.intervalMs,
-        enabled: false,
-        backendJobId: undefined,
-      }));
-      
-      // Restore loadedDbcFiles Map from restored channels
-      const restoredDbcFiles = new Map<string, string>();
-      for (const channel of restoredChannels) {
-        if (channel.dbcFile) {
-          restoredDbcFiles.set(channel.id, channel.dbcFile);
+    const project = await invoke<ProjectFile>("load_project", { filePath });
+
+    const nets: Net[] = project.nets.map((n) => ({
+      id: n.id,
+      name: n.name,
+      bitrate: n.bitrate,
+      assignedDeviceId: n.assignedDeviceId,
+      symbolFilePath: n.symbolFilePath,
+      comment: n.comment ?? undefined,
+      connectionStatus: "disconnected" as ConnectionStatus,
+    }));
+
+    const transmitRows: TransmitRow[] = project.transmitRows.map((r) => ({
+      id: r.id,
+      name: r.name,
+      comment: r.comment,
+      netId: r.netId,
+      canId: r.canId,
+      isExtended: r.isExtended,
+      isRemote: r.isRemote,
+      dlc: r.dlc,
+      data: r.data,
+      cycleMs: r.cycleMs,
+      paused: true,
+      count: 0,
+      manualCount: 0,
+      signalValues: r.signalValues ?? undefined,
+    }));
+
+    set({
+      nets,
+      filters: project.filters.map((f) => f.data),
+      transmitRows,
+      activeNetId: nets.length > 0 ? nets[0].id : null,
+      messageNames: new Map(),
+    });
+
+    // Load symbol files (also updates the backend databases)
+    for (const net of nets) {
+      if (net.symbolFilePath) {
+        try {
+          await get().loadSymbolFile(net.id, net.symbolFilePath);
+        } catch (error) {
+          console.warn(`Failed to load symbol file for net ${net.name}:`, error);
+          set((s) => ({
+            nets: s.nets.map((n) =>
+              n.id === net.id ? { ...n, symbolFilePath: null } : n
+            ),
+          }));
         }
       }
-      
-      // Update state first
-      set({
-        channels: restoredChannels,
-        filters: restoredFilters,
-        transmitJobs: restoredTransmitJobs,
-        activeChannel: restoredChannels.length > 0 ? restoredChannels[0].id : null,
-        loadedDbcFiles: restoredDbcFiles,
-      });
-      
-      // Load DBC files if they exist (this will also update the backend)
-      for (const channel of restoredChannels) {
-        if (channel.dbcFile) {
-          try {
-            await get().loadDbc(channel.id, channel.dbcFile);
-          } catch (error) {
-            console.warn(`Failed to load DBC file ${channel.dbcFile} for channel ${channel.id}:`, error);
-            // Remove from loadedDbcFiles if loading failed
-            set((s) => {
-              const newMap = new Map(s.loadedDbcFiles);
-              newMap.delete(channel.id);
-              return { loadedDbcFiles: newMap };
-            });
-            // Continue loading even if DBC fails
-          }
-        }
-      }
-      
-      console.log("Project loaded successfully");
-    } catch (error) {
-      console.error("Failed to load project:", error);
-      throw error;
     }
   },
 
-  // Plot actions
-  setViewTab: (tab: "monitor" | "plot") => set({ viewTab: tab }),
+  // --- Plot ---
 
   addPlotSignal: (signal: PlotSignal) => {
     set((s) => {
       const key = `${signal.channelId}-${signal.messageId}-${signal.signalName}`;
-      // Check if already exists
-      if (s.selectedPlotSignals.some(
-        (sig) => sig.channelId === signal.channelId &&
-                 sig.messageId === signal.messageId &&
-                 sig.signalName === signal.signalName
-      )) {
+      if (
+        s.selectedPlotSignals.some(
+          (sig) =>
+            sig.channelId === signal.channelId &&
+            sig.messageId === signal.messageId &&
+            sig.signalName === signal.signalName
+        )
+      ) {
         return {};
       }
-      // Initialize empty data array for this signal
       const newPlotData = new Map(s.plotData);
-      if (!newPlotData.has(key)) {
-        newPlotData.set(key, []);
-      }
+      if (!newPlotData.has(key)) newPlotData.set(key, []);
       return {
         selectedPlotSignals: [...s.selectedPlotSignals, signal],
         plotData: newPlotData,
@@ -1105,9 +849,12 @@ export const useCanStore = create<CanState>((set, get) => ({
       newPlotData.delete(key);
       return {
         selectedPlotSignals: s.selectedPlotSignals.filter(
-          (sig) => !(sig.channelId === signal.channelId &&
-                     sig.messageId === signal.messageId &&
-                     sig.signalName === signal.signalName)
+          (sig) =>
+            !(
+              sig.channelId === signal.channelId &&
+              sig.messageId === signal.messageId &&
+              sig.signalName === signal.signalName
+            )
         ),
         plotData: newPlotData,
       };
@@ -1117,7 +864,6 @@ export const useCanStore = create<CanState>((set, get) => ({
   clearPlotData: () => {
     set((s) => {
       const newPlotData = new Map<string, PlotDataPoint[]>();
-      // Keep the structure but clear all data
       for (const signal of s.selectedPlotSignals) {
         const key = `${signal.channelId}-${signal.messageId}-${signal.signalName}`;
         newPlotData.set(key, []);
@@ -1127,21 +873,37 @@ export const useCanStore = create<CanState>((set, get) => ({
   },
 
   togglePlotPause: () => set((s) => ({ isPlotPaused: !s.isPlotPaused })),
-
   setPlotTimeWindow: (window: number) => set({ plotTimeWindow: window }),
-
   setPlotData: (data: Map<string, PlotDataPoint[]>) => set({ plotData: data }),
 }));
 
-// Cleanup function for unmounting
-export const cleanupCanStore = () => {
-  if (unlistenMessage) {
-    unlistenMessage();
-    unlistenMessage = null;
-  }
-  if (unlistenStats) {
-    unlistenStats();
-    unlistenStats = null;
-  }
+// Counts come back from Rust as u64 -> JS number
+type u64Number = number;
+
+/** True when at least one net is connected. */
+export const useAnyConnected = () =>
+  useCanStore((s) => s.nets.some((n) => n.connectionStatus === "connected"));
+
+/** Net lookup helpers (shallow-stable). */
+export const useNets = () => useCanStore(useShallow((s) => s.nets));
+
+export const useNetName = () => {
+  const nets = useNets();
+  return (netId: string) => nets.find((n) => n.id === netId)?.name ?? netId;
 };
 
+// Cleanup function for unmounting
+export const cleanupCanStore = () => {
+  unlistenBatch?.();
+  unlistenBatch = null;
+  unlistenStats?.();
+  unlistenStats = null;
+  unlistenInterfaces?.();
+  unlistenInterfaces = null;
+  unlistenChannelError?.();
+  unlistenChannelError = null;
+  if (txCountTimer) {
+    clearInterval(txCountTimer);
+    txCountTimer = null;
+  }
+};

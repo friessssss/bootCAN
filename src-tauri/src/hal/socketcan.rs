@@ -5,7 +5,6 @@
 
 use super::traits::{BusState, CanFilter, CanInterface, InterfaceInfo};
 use crate::core::message::CanFrame;
-use async_trait::async_trait;
 use std::time::Instant;
 
 #[cfg(target_os = "linux")]
@@ -42,7 +41,6 @@ impl SocketCanInterface {
 }
 
 #[cfg(target_os = "linux")]
-#[async_trait]
 impl CanInterface for SocketCanInterface {
     fn info(&self) -> InterfaceInfo {
         InterfaceInfo {
@@ -50,10 +48,11 @@ impl CanInterface for SocketCanInterface {
             name: self.name.clone(),
             interface_type: "socketcan".to_string(),
             available: true,
+            ..Default::default()
         }
     }
 
-    async fn connect(&mut self, bitrate: u32) -> Result<(), String> {
+    fn connect(&mut self, bitrate: u32) -> Result<(), String> {
         if self.connected {
             return Err("Already connected".to_string());
         }
@@ -83,7 +82,7 @@ impl CanInterface for SocketCanInterface {
         Ok(())
     }
 
-    async fn disconnect(&mut self) -> Result<(), String> {
+    fn disconnect(&mut self) -> Result<(), String> {
         if !self.connected {
             return Err("Not connected".to_string());
         }
@@ -101,7 +100,7 @@ impl CanInterface for SocketCanInterface {
         self.connected
     }
 
-    async fn send(&mut self, frame: &CanFrame) -> Result<(), String> {
+    fn send(&mut self, frame: &CanFrame) -> Result<(), String> {
         let socket = self.socket.as_ref().ok_or("Not connected")?;
 
         // Convert to SocketCAN frame
@@ -138,52 +137,46 @@ impl CanInterface for SocketCanInterface {
         Ok(())
     }
 
-    async fn receive(&mut self) -> Result<Option<CanFrame>, String> {
+    fn receive_batch(&mut self, max: usize) -> Result<Vec<CanFrame>, String> {
         let socket = self.socket.as_ref().ok_or("Not connected")?;
+        let mut frames = Vec::new();
 
-        match socket.read_frame() {
-            Ok(socketcan_frame) => {
-                let timestamp = self
-                    .start_time
-                    .map(|t| t.elapsed().as_secs_f64())
-                    .unwrap_or(0.0);
+        while frames.len() < max {
+            match socket.read_frame() {
+                Ok(socketcan_frame) => {
+                    let timestamp = self
+                        .start_time
+                        .map(|t| t.elapsed().as_secs_f64())
+                        .unwrap_or(0.0);
 
-                // Convert from SocketCAN frame
-                let (id, is_extended) = match socketcan_frame.id() {
-                    socketcan::Id::Standard(std_id) => (std_id.as_raw() as u32, false),
-                    socketcan::Id::Extended(ext_id) => (ext_id.as_raw(), true),
-                };
+                    // Convert from SocketCAN frame
+                    let (id, is_extended) = match socketcan_frame.id() {
+                        socketcan::Id::Standard(std_id) => (std_id.as_raw() as u32, false),
+                        socketcan::Id::Extended(ext_id) => (ext_id.as_raw(), true),
+                    };
 
-                let frame = CanFrame {
-                    id,
-                    is_extended,
-                    is_remote: socketcan_frame.is_remote_frame(),
-                    dlc: socketcan_frame.dlc() as u8,
-                    data: socketcan_frame.data().to_vec(),
-                    timestamp,
-                    channel: self.id.clone(),
-                    direction: "rx".to_string(),
-                };
-
-                log::trace!(
-                    "SocketCAN {} RX: ID=0x{:X} DLC={} Data={:?}",
-                    self.id,
-                    frame.id,
-                    frame.dlc,
-                    &frame.data
-                );
-
-                Ok(Some(frame))
-            }
-            Err(e) => {
-                // WouldBlock means no frame available (non-blocking mode)
-                if e.kind() == std::io::ErrorKind::WouldBlock {
-                    Ok(None)
-                } else {
-                    Err(format!("Failed to receive frame: {}", e))
+                    frames.push(CanFrame {
+                        id,
+                        is_extended,
+                        is_remote: socketcan_frame.is_remote_frame(),
+                        dlc: socketcan_frame.dlc() as u8,
+                        data: socketcan_frame.data().to_vec(),
+                        timestamp,
+                        channel: self.id.clone(),
+                        direction: "rx".to_string(),
+                    });
+                }
+                Err(e) => {
+                    // WouldBlock means no frame available (non-blocking mode)
+                    if e.kind() == std::io::ErrorKind::WouldBlock {
+                        break;
+                    }
+                    return Err(format!("Failed to receive frame: {}", e));
                 }
             }
         }
+
+        Ok(frames)
     }
 
     fn set_filter(&mut self, filter: Option<CanFilter>) -> Result<(), String> {
@@ -218,7 +211,6 @@ impl CanInterface for SocketCanInterface {
 
 // Stub implementation for non-Linux systems
 #[cfg(not(target_os = "linux"))]
-#[async_trait]
 impl CanInterface for SocketCanInterface {
     fn info(&self) -> InterfaceInfo {
         InterfaceInfo {
@@ -226,14 +218,15 @@ impl CanInterface for SocketCanInterface {
             name: self.name.clone(),
             interface_type: "socketcan".to_string(),
             available: false,
+            ..Default::default()
         }
     }
 
-    async fn connect(&mut self, _bitrate: u32) -> Result<(), String> {
+    fn connect(&mut self, _bitrate: u32) -> Result<(), String> {
         Err("SocketCAN is only available on Linux".to_string())
     }
 
-    async fn disconnect(&mut self) -> Result<(), String> {
+    fn disconnect(&mut self) -> Result<(), String> {
         Err("SocketCAN is only available on Linux".to_string())
     }
 
@@ -241,11 +234,11 @@ impl CanInterface for SocketCanInterface {
         false
     }
 
-    async fn send(&mut self, _frame: &CanFrame) -> Result<(), String> {
+    fn send(&mut self, _frame: &CanFrame) -> Result<(), String> {
         Err("SocketCAN is only available on Linux".to_string())
     }
 
-    async fn receive(&mut self) -> Result<Option<CanFrame>, String> {
+    fn receive_batch(&mut self, _max: usize) -> Result<Vec<CanFrame>, String> {
         Err("SocketCAN is only available on Linux".to_string())
     }
 
@@ -257,4 +250,3 @@ impl CanInterface for SocketCanInterface {
         BusState::Unknown
     }
 }
-

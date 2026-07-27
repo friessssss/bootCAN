@@ -1,9 +1,8 @@
 use crate::core::message::CanFrame;
-use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
 /// Information about an available CAN interface
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct InterfaceInfo {
     /// Unique identifier for the interface
@@ -13,30 +12,52 @@ pub struct InterfaceInfo {
     /// Interface type (socketcan, pcan, virtual)
     #[serde(rename = "type")]
     pub interface_type: String,
-    /// Whether the interface is currently available
+    /// Whether the interface can be connected to right now
     pub available: bool,
+    /// Detailed availability: "available" or "occupied" (in use by an app)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub condition: Option<String>,
+    /// Hardware device id (user-configurable on PCAN devices)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub device_id: Option<u32>,
+    /// Firmware version reported by the device
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub firmware: Option<String>,
 }
 
-/// Trait for CAN interface implementations
-#[async_trait]
+/// CAN operating mode. FD is modeled but not yet implemented by any driver.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
+pub enum CanMode {
+    Classic,
+    Fd { data_bitrate: u32 },
+}
+
+/// Trait for CAN interface implementations.
+///
+/// All methods are synchronous and non-blocking: implementations that need to
+/// block (e.g. waiting on hardware) do so on their own internal threads and
+/// expose received frames through `receive_batch`.
 pub trait CanInterface: Send + Sync {
     /// Get interface information
     fn info(&self) -> InterfaceInfo;
 
     /// Connect to the CAN bus with specified bitrate
-    async fn connect(&mut self, bitrate: u32) -> Result<(), String>;
+    fn connect(&mut self, bitrate: u32) -> Result<(), String>;
 
     /// Disconnect from the CAN bus
-    async fn disconnect(&mut self) -> Result<(), String>;
+    fn disconnect(&mut self) -> Result<(), String>;
 
     /// Check if connected
     fn is_connected(&self) -> bool;
 
-    /// Send a CAN frame
-    async fn send(&mut self, frame: &CanFrame) -> Result<(), String>;
+    /// Send a CAN frame (non-blocking; queues into the driver)
+    fn send(&mut self, frame: &CanFrame) -> Result<(), String>;
 
-    /// Receive a CAN frame (non-blocking, returns None if no frame available)
-    async fn receive(&mut self) -> Result<Option<CanFrame>, String>;
+    /// Drain up to `max` pending received frames (non-blocking).
+    /// An error indicates the interface is no longer usable (e.g. device
+    /// unplugged), not a transient empty queue.
+    fn receive_batch(&mut self, max: usize) -> Result<Vec<CanFrame>, String>;
 
     /// Set receive filter (pass None to receive all)
     fn set_filter(&mut self, filter: Option<CanFilter>) -> Result<(), String>;
@@ -110,7 +131,10 @@ impl Default for BusState {
     }
 }
 
-/// Enumerates available CAN interfaces on the system
+/// Enumerates available CAN interfaces on the system.
+///
+/// Hardware entries reflect actually-attached devices (auto-detection); the
+/// two virtual loopback interfaces are always present.
 pub fn enumerate_interfaces() -> Vec<InterfaceInfo> {
     let mut interfaces = Vec::new();
 
@@ -120,6 +144,7 @@ pub fn enumerate_interfaces() -> Vec<InterfaceInfo> {
         name: "Virtual CAN 0".to_string(),
         interface_type: "virtual".to_string(),
         available: true,
+        ..Default::default()
     });
 
     interfaces.push(InterfaceInfo {
@@ -127,6 +152,7 @@ pub fn enumerate_interfaces() -> Vec<InterfaceInfo> {
         name: "Virtual CAN 1".to_string(),
         interface_type: "virtual".to_string(),
         available: true,
+        ..Default::default()
     });
 
     // Enumerate SocketCAN interfaces on Linux
@@ -137,12 +163,10 @@ pub fn enumerate_interfaces() -> Vec<InterfaceInfo> {
         }
     }
 
-    // Enumerate PCAN interfaces on Windows/macOS
+    // Probe for attached PCAN devices on Windows/macOS
     #[cfg(any(target_os = "windows", target_os = "macos"))]
     {
-        if let Ok(pcan_interfaces) = enumerate_pcan_interfaces() {
-            interfaces.extend(pcan_interfaces);
-        }
+        interfaces.extend(crate::hal::pcan::enumerate_devices());
     }
 
     interfaces
@@ -158,7 +182,7 @@ fn enumerate_socketcan_interfaces() -> Result<Vec<InterfaceInfo>, String> {
     if let Ok(entries) = fs::read_dir("/sys/class/net") {
         for entry in entries.flatten() {
             let name = entry.file_name().to_string_lossy().to_string();
-            
+
             // Check if it's a CAN interface by looking for the can protocol
             let type_path = entry.path().join("type");
             if let Ok(type_str) = fs::read_to_string(&type_path) {
@@ -172,6 +196,7 @@ fn enumerate_socketcan_interfaces() -> Result<Vec<InterfaceInfo>, String> {
                             name: format!("SocketCAN: {}", name),
                             interface_type: "socketcan".to_string(),
                             available: true,
+                            ..Default::default()
                         });
                     }
                 }
@@ -181,27 +206,3 @@ fn enumerate_socketcan_interfaces() -> Result<Vec<InterfaceInfo>, String> {
 
     Ok(interfaces)
 }
-
-#[cfg(any(target_os = "windows", target_os = "macos"))]
-fn enumerate_pcan_interfaces() -> Result<Vec<InterfaceInfo>, String> {
-    // PCAN USB device enumeration
-    // In a real implementation, this would call the PCAN API to enumerate devices
-    let interfaces = vec![
-        InterfaceInfo {
-            id: "pcan_usb1".to_string(),
-            name: "PCAN-USB 1".to_string(),
-            interface_type: "pcan".to_string(),
-            // Would check actual availability via PCAN API
-            available: false,
-        },
-        InterfaceInfo {
-            id: "pcan_usb2".to_string(),
-            name: "PCAN-USB 2".to_string(),
-            interface_type: "pcan".to_string(),
-            available: false,
-        },
-    ];
-
-    Ok(interfaces)
-}
-

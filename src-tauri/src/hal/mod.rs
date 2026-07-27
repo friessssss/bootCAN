@@ -7,3 +7,5 @@ pub mod socketcan;
 #[cfg(any(target_os = "windows", target_os = "macos"))]
 pub mod pcan;
 
+#[cfg(any(target_os = "windows", target_os = "macos"))]
+pub mod pcbusb;

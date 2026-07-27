@@ -1,7 +1,7 @@
 {
   "name": "bootcan",
   "private": true,
-  "version": "0.2.0",
+  "version": "0.3.0",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -14,10 +14,10 @@
     "build:release": "./build.sh"
   },
   "dependencies": {
+    "@tanstack/react-virtual": "^3.14.8",
     "@tauri-apps/api": "^2.0.0",
     "@tauri-apps/plugin-dialog": "^2.4.2",
     "@tauri-apps/plugin-shell": "^2.0.0",
-    "clsx": "^2.1.1",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
     "uplot": "^1.6.26",
