@@ -37,6 +37,12 @@ pub struct Signal {
     pub receivers: Vec<String>,
     pub comment: Option<String>,
     pub value_table: Option<String>, // Reference to value table name
+    /// Selects which multiplexed signals are present. Always decoded.
+    #[serde(default)]
+    pub is_multiplexer: bool,
+    /// Decoded only when the message multiplexor equals this raw value.
+    #[serde(default)]
+    pub multiplex: Option<u64>,
 }
 
 /// Byte order (endianness)
@@ -73,7 +79,12 @@ impl DbcDatabase {
     }
 
     /// Decode a signal from raw CAN data
-    pub fn decode_signal(&self, message_id: u32, signal_name: &str, data: &[u8]) -> Option<DecodedSignal> {
+    pub fn decode_signal(
+        &self,
+        message_id: u32,
+        signal_name: &str,
+        data: &[u8],
+    ) -> Option<DecodedSignal> {
         let message = self.get_message(message_id)?;
         let signal = message.signals.iter().find(|s| s.name == signal_name)?;
         self.decode_one(signal, data)
@@ -81,14 +92,26 @@ impl DbcDatabase {
 
     /// Decode all signals in a message
     pub fn decode_message(&self, message_id: u32, data: &[u8]) -> Vec<DecodedSignal> {
-        if let Some(message) = self.get_message(message_id) {
-            message.signals
-                .iter()
-                .filter_map(|signal| self.decode_one(signal, data))
-                .collect()
-        } else {
-            vec![]
-        }
+        let Some(message) = self.get_message(message_id) else {
+            return vec![];
+        };
+        let mux_value = message
+            .signals
+            .iter()
+            .find(|signal| signal.is_multiplexer)
+            .and_then(|signal| match signal.extract_value(data)? {
+                SignalValue::Integer(value) if value >= 0 => Some(value as u64),
+                _ => None,
+            });
+        message
+            .signals
+            .iter()
+            .filter(|signal| match signal.multiplex {
+                Some(expected) => mux_value == Some(expected),
+                None => true,
+            })
+            .filter_map(|signal| self.decode_one(signal, data))
+            .collect()
     }
 
     fn decode_one(&self, signal: &Signal, data: &[u8]) -> Option<DecodedSignal> {
@@ -97,7 +120,9 @@ impl DbcDatabase {
             SignalValue::Float(f) => (f.round() as i64, f * signal.factor + signal.offset),
         };
 
-        let value_name = signal.value_table.as_ref()
+        let value_name = signal
+            .value_table
+            .as_ref()
             .and_then(|vt_name| self.value_tables.get(vt_name))
             .and_then(|vt| vt.values.get(&raw_value))
             .cloned();
@@ -214,7 +239,11 @@ impl Signal {
                 // Sign extension
                 let sign_bit = 1u64 << (self.length - 1);
                 let value = if raw & sign_bit != 0 {
-                    let mask = if self.length == 64 { u64::MAX } else { (1u64 << self.length) - 1 };
+                    let mask = if self.length == 64 {
+                        u64::MAX
+                    } else {
+                        (1u64 << self.length) - 1
+                    };
                     (raw | !mask) as i64
                 } else {
                     raw as i64
@@ -240,7 +269,10 @@ impl Signal {
     /// min/max (when meaningful) and its bit width.
     pub fn pack(&self, data: &mut [u8], physical: f64) -> Result<(), String> {
         if self.length == 0 || self.length > 64 {
-            return Err(format!("Signal '{}' has invalid length {}", self.name, self.length));
+            return Err(format!(
+                "Signal '{}' has invalid length {}",
+                self.name, self.length
+            ));
         }
         if self.factor == 0.0 {
             return Err(format!("Signal '{}' has zero factor", self.name));
@@ -254,7 +286,11 @@ impl Signal {
             }
         }
 
-        let width_mask = if self.length == 64 { u64::MAX } else { (1u64 << self.length) - 1 };
+        let width_mask = if self.length == 64 {
+            u64::MAX
+        } else {
+            (1u64 << self.length) - 1
+        };
         let raw_scaled = (phys - self.offset) / self.factor;
 
         let raw: u64 = match self.value_type {
@@ -330,6 +366,8 @@ mod tests {
             receivers: vec![],
             comment: None,
             value_table: None,
+            is_multiplexer: false,
+            multiplex: None,
         }
     }
 
@@ -352,7 +390,15 @@ mod tests {
     #[test]
     fn intel_unsigned_known_vector() {
         // 16-bit Intel unsigned at bit 8 = bytes 1..2 little-endian
-        let s = signal("s", 8, 16, ByteOrder::LittleEndian, ValueType::Unsigned, 1.0, 0.0);
+        let s = signal(
+            "s",
+            8,
+            16,
+            ByteOrder::LittleEndian,
+            ValueType::Unsigned,
+            1.0,
+            0.0,
+        );
         let db = db_with(vec![s], 8);
         let data = [0x00, 0x34, 0x12, 0, 0, 0, 0, 0];
         let decoded = db.decode_message(0x100, &data);
@@ -363,7 +409,15 @@ mod tests {
     fn motorola_unsigned_known_vector() {
         // 16-bit Motorola with MSB at bit 7 = bytes 0..1 big-endian
         // (cross-checked against cantools: start=7, length=16, big_endian)
-        let s = signal("s", 7, 16, ByteOrder::BigEndian, ValueType::Unsigned, 1.0, 0.0);
+        let s = signal(
+            "s",
+            7,
+            16,
+            ByteOrder::BigEndian,
+            ValueType::Unsigned,
+            1.0,
+            0.0,
+        );
         let db = db_with(vec![s], 8);
         let data = [0x12, 0x34, 0, 0, 0, 0, 0, 0];
         let decoded = db.decode_message(0x100, &data);
@@ -373,21 +427,45 @@ mod tests {
     #[test]
     fn short_dlc_frames_decode_contained_signals() {
         // Signal fully inside 2 bytes must decode from a DLC-2 frame
-        let s = signal("s", 0, 16, ByteOrder::LittleEndian, ValueType::Unsigned, 1.0, 0.0);
+        let s = signal(
+            "s",
+            0,
+            16,
+            ByteOrder::LittleEndian,
+            ValueType::Unsigned,
+            1.0,
+            0.0,
+        );
         let db = db_with(vec![s], 2);
         let decoded = db.decode_message(0x100, &[0xCD, 0xAB]);
         assert_eq!(decoded.len(), 1);
         assert_eq!(decoded[0].raw_value, 0xABCD);
 
         // A signal extending beyond the payload must be skipped, not error
-        let s2 = signal("s2", 8, 16, ByteOrder::LittleEndian, ValueType::Unsigned, 1.0, 0.0);
+        let s2 = signal(
+            "s2",
+            8,
+            16,
+            ByteOrder::LittleEndian,
+            ValueType::Unsigned,
+            1.0,
+            0.0,
+        );
         let db2 = db_with(vec![s2], 3);
         assert!(db2.decode_message(0x100, &[0xFF]).is_empty());
     }
 
     #[test]
     fn float_signal_keeps_fraction() {
-        let s = signal("f", 0, 32, ByteOrder::LittleEndian, ValueType::Float, 1.0, 0.0);
+        let s = signal(
+            "f",
+            0,
+            32,
+            ByteOrder::LittleEndian,
+            ValueType::Float,
+            1.0,
+            0.0,
+        );
         let db = db_with(vec![s], 4);
         let data = 1.5f32.to_le_bytes();
         let decoded = db.decode_message(0x100, &data);
@@ -396,7 +474,15 @@ mod tests {
 
     #[test]
     fn signed_sign_extension() {
-        let s = signal("s", 0, 12, ByteOrder::LittleEndian, ValueType::Signed, 1.0, 0.0);
+        let s = signal(
+            "s",
+            0,
+            12,
+            ByteOrder::LittleEndian,
+            ValueType::Signed,
+            1.0,
+            0.0,
+        );
         let db = db_with(vec![s], 8);
         // 12-bit -1 = 0xFFF
         let data = [0xFF, 0x0F, 0, 0, 0, 0, 0, 0];
@@ -407,10 +493,42 @@ mod tests {
     #[test]
     fn encode_decode_round_trip() {
         let cases = vec![
-            signal("a", 0, 8, ByteOrder::LittleEndian, ValueType::Unsigned, 1.0, 0.0),
-            signal("b", 8, 12, ByteOrder::LittleEndian, ValueType::Signed, 0.5, -100.0),
-            signal("c", 31, 16, ByteOrder::BigEndian, ValueType::Unsigned, 0.125, 0.0),
-            signal("d", 55, 10, ByteOrder::BigEndian, ValueType::Signed, 1.0, 0.0),
+            signal(
+                "a",
+                0,
+                8,
+                ByteOrder::LittleEndian,
+                ValueType::Unsigned,
+                1.0,
+                0.0,
+            ),
+            signal(
+                "b",
+                8,
+                12,
+                ByteOrder::LittleEndian,
+                ValueType::Signed,
+                0.5,
+                -100.0,
+            ),
+            signal(
+                "c",
+                31,
+                16,
+                ByteOrder::BigEndian,
+                ValueType::Unsigned,
+                0.125,
+                0.0,
+            ),
+            signal(
+                "d",
+                55,
+                10,
+                ByteOrder::BigEndian,
+                ValueType::Signed,
+                1.0,
+                0.0,
+            ),
         ];
         let db = db_with(cases, 8);
 
@@ -441,10 +559,42 @@ mod tests {
     #[test]
     fn encode_matches_cantools_golden() {
         let cases = vec![
-            signal("a", 0, 8, ByteOrder::LittleEndian, ValueType::Unsigned, 1.0, 0.0),
-            signal("b", 8, 12, ByteOrder::LittleEndian, ValueType::Signed, 0.5, -100.0),
-            signal("c", 31, 16, ByteOrder::BigEndian, ValueType::Unsigned, 0.125, 0.0),
-            signal("d", 55, 10, ByteOrder::BigEndian, ValueType::Signed, 1.0, 0.0),
+            signal(
+                "a",
+                0,
+                8,
+                ByteOrder::LittleEndian,
+                ValueType::Unsigned,
+                1.0,
+                0.0,
+            ),
+            signal(
+                "b",
+                8,
+                12,
+                ByteOrder::LittleEndian,
+                ValueType::Signed,
+                0.5,
+                -100.0,
+            ),
+            signal(
+                "c",
+                31,
+                16,
+                ByteOrder::BigEndian,
+                ValueType::Unsigned,
+                0.125,
+                0.0,
+            ),
+            signal(
+                "d",
+                55,
+                10,
+                ByteOrder::BigEndian,
+                ValueType::Signed,
+                1.0,
+                0.0,
+            ),
         ];
         let db = db_with(cases, 8);
         let mut values = HashMap::new();
@@ -458,7 +608,15 @@ mod tests {
 
     #[test]
     fn encode_preserves_base_bytes() {
-        let s = signal("a", 8, 8, ByteOrder::LittleEndian, ValueType::Unsigned, 1.0, 0.0);
+        let s = signal(
+            "a",
+            8,
+            8,
+            ByteOrder::LittleEndian,
+            ValueType::Unsigned,
+            1.0,
+            0.0,
+        );
         let db = db_with(vec![s], 4);
         let base = vec![0xDE, 0x00, 0xBE, 0xEF];
         let mut values = HashMap::new();
@@ -469,7 +627,15 @@ mod tests {
 
     #[test]
     fn encode_clamps_to_range_and_width() {
-        let mut s = signal("a", 0, 8, ByteOrder::LittleEndian, ValueType::Unsigned, 1.0, 0.0);
+        let mut s = signal(
+            "a",
+            0,
+            8,
+            ByteOrder::LittleEndian,
+            ValueType::Unsigned,
+            1.0,
+            0.0,
+        );
         s.minimum = Some(0.0);
         s.maximum = Some(100.0);
         let db = db_with(vec![s], 1);
@@ -490,4 +656,3 @@ mod tests {
         assert_eq!(decoded[0].physical_value, 3.25);
     }
 }
-

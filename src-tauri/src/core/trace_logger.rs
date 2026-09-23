@@ -374,4 +374,3 @@ mod tests {
         assert_eq!(TraceFormat::Trc.extension(), "trc");
     }
 }
-

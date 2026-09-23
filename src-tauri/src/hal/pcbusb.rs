@@ -28,10 +28,8 @@ pub const PCAN_ERROR_BUSLIGHT: u32 = 0x00004;
 pub const PCAN_ERROR_BUSHEAVY: u32 = 0x00008;
 pub const PCAN_ERROR_BUSPASSIVE: u32 = 0x40000;
 pub const PCAN_ERROR_BUSOFF: u32 = 0x00010;
-pub const PCAN_ERROR_ANYBUSERR: u32 = PCAN_ERROR_BUSLIGHT
-    | PCAN_ERROR_BUSHEAVY
-    | PCAN_ERROR_BUSOFF
-    | PCAN_ERROR_BUSPASSIVE;
+pub const PCAN_ERROR_ANYBUSERR: u32 =
+    PCAN_ERROR_BUSLIGHT | PCAN_ERROR_BUSHEAVY | PCAN_ERROR_BUSOFF | PCAN_ERROR_BUSPASSIVE;
 pub const PCAN_ERROR_QRCVEMPTY: u32 = 0x00020;
 pub const PCAN_ERROR_QOVERRUN: u32 = 0x00040;
 pub const PCAN_ERROR_QXMTFULL: u32 = 0x00080;
@@ -198,7 +196,9 @@ fn build_api(lib: Library) -> Result<PcbusbApi, String> {
         can_set_value: sym!("CAN_SetValue", CanSetValueFn),
         can_get_error_text: sym!("CAN_GetErrorText", CanGetErrorTextFn),
         can_initialize_fd: unsafe {
-            lib.get::<CanInitializeFdFn>(b"CAN_InitializeFD").ok().map(|s| *s)
+            lib.get::<CanInitializeFdFn>(b"CAN_InitializeFD")
+                .ok()
+                .map(|s| *s)
         },
         _lib: lib,
     };

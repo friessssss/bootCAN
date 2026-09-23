@@ -225,4 +225,3 @@ mod tests {
         assert_eq!(extended.id_hex(), "12345678");
     }
 }
-

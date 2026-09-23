@@ -298,4 +298,3 @@ impl Default for ChannelManager {
         Self::new()
     }
 }
-

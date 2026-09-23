@@ -237,7 +237,8 @@ mod tests {
         vcan.connect(500_000).unwrap();
 
         // Set filter to only accept ID 0x200
-        vcan.set_filter(Some(CanFilter::single(0x200, false))).unwrap();
+        vcan.set_filter(Some(CanFilter::single(0x200, false)))
+            .unwrap();
 
         // Send a frame that doesn't match
         let frame1 = CanFrame::new(0x123, &[1, 2, 3, 4]);

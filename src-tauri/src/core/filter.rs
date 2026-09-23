@@ -46,34 +46,22 @@ impl FilterRule {
     /// Check if a frame matches this filter rule
     pub fn matches(&self, frame: &CanFrame) -> bool {
         match self {
-            FilterRule::IdRange { min, max } => {
-                frame.id >= *min && frame.id <= *max
-            }
-            FilterRule::IdExact(id) => {
-                frame.id == *id
-            }
-            FilterRule::DataPattern { pattern } => {
-                pattern.iter().all(|match_spec| {
-                    if (match_spec.position as usize) < frame.data.len() {
-                        let byte = frame.data[match_spec.position as usize];
-                        (byte & match_spec.mask) == (match_spec.value & match_spec.mask)
-                    } else {
-                        false
-                    }
-                })
-            }
-            FilterRule::DlcRange { min, max } => {
-                frame.dlc >= *min && frame.dlc <= *max
-            }
+            FilterRule::IdRange { min, max } => frame.id >= *min && frame.id <= *max,
+            FilterRule::IdExact(id) => frame.id == *id,
+            FilterRule::DataPattern { pattern } => pattern.iter().all(|match_spec| {
+                if (match_spec.position as usize) < frame.data.len() {
+                    let byte = frame.data[match_spec.position as usize];
+                    (byte & match_spec.mask) == (match_spec.value & match_spec.mask)
+                } else {
+                    false
+                }
+            }),
+            FilterRule::DlcRange { min, max } => frame.dlc >= *min && frame.dlc <= *max,
             FilterRule::Direction { rx, tx } => {
                 (frame.direction == "rx" && *rx) || (frame.direction == "tx" && *tx)
             }
-            FilterRule::ExtendedId(extended) => {
-                frame.is_extended == *extended
-            }
-            FilterRule::RemoteFrame(remote) => {
-                frame.is_remote == *remote
-            }
+            FilterRule::ExtendedId(extended) => frame.is_extended == *extended,
+            FilterRule::RemoteFrame(remote) => frame.is_remote == *remote,
         }
     }
 }
@@ -91,12 +79,8 @@ impl FilterSet {
         }
 
         match self.logic {
-            FilterLogic::And => {
-                self.rules.iter().all(|rule| rule.matches(frame))
-            }
-            FilterLogic::Or => {
-                self.rules.iter().any(|rule| rule.matches(frame))
-            }
+            FilterLogic::And => self.rules.iter().all(|rule| rule.matches(frame)),
+            FilterLogic::Or => self.rules.iter().any(|rule| rule.matches(frame)),
         }
     }
 
@@ -121,7 +105,10 @@ mod tests {
 
     #[test]
     fn test_id_range_filter() {
-        let filter = FilterRule::IdRange { min: 0x100, max: 0x200 };
+        let filter = FilterRule::IdRange {
+            min: 0x100,
+            max: 0x200,
+        };
         let frame1 = CanFrame {
             id: 0x150,
             ..Default::default()
@@ -138,13 +125,11 @@ mod tests {
     #[test]
     fn test_data_pattern_filter() {
         let filter = FilterRule::DataPattern {
-            pattern: vec![
-                DataByteMatch {
-                    position: 0,
-                    value: 0x01,
-                    mask: 0xFF,
-                },
-            ],
+            pattern: vec![DataByteMatch {
+                position: 0,
+                value: 0x01,
+                mask: 0xFF,
+            }],
         };
         let mut frame1 = CanFrame::default();
         frame1.data = vec![0x01, 0x02, 0x03];
@@ -159,8 +144,14 @@ mod tests {
     fn test_filter_set_and() {
         let filter_set = FilterSet::new(
             vec![
-                FilterRule::IdRange { min: 0x100, max: 0x200 },
-                FilterRule::Direction { rx: true, tx: false },
+                FilterRule::IdRange {
+                    min: 0x100,
+                    max: 0x200,
+                },
+                FilterRule::Direction {
+                    rx: true,
+                    tx: false,
+                },
             ],
             FilterLogic::And,
         );
@@ -177,6 +168,3 @@ mod tests {
         assert!(!filter_set.matches(&frame2));
     }
 }
-
-
-

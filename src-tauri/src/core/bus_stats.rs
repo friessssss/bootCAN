@@ -78,4 +78,3 @@ pub struct ExtendedBusStats {
     /// Number of unique message IDs seen
     pub unique_ids: u32,
 }
-

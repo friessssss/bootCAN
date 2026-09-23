@@ -8,7 +8,9 @@ use crate::core::message::CanFrame;
 use std::time::Instant;
 
 #[cfg(target_os = "linux")]
-use socketcan::{CanSocket, Socket, CanFrame as SocketCanFrame, EmbeddedFrame, StandardId, ExtendedId, Frame};
+use socketcan::{
+    CanFrame as SocketCanFrame, CanSocket, EmbeddedFrame, ExtendedId, Frame, Socket, StandardId,
+};
 
 /// SocketCAN interface for Linux systems
 pub struct SocketCanInterface {
@@ -67,7 +69,8 @@ impl CanInterface for SocketCanInterface {
             .map_err(|e| format!("Failed to open SocketCAN interface {}: {}", self.id, e))?;
 
         // Set non-blocking mode
-        socket.set_nonblocking(true)
+        socket
+            .set_nonblocking(true)
             .map_err(|e| format!("Failed to set non-blocking mode: {}", e))?;
 
         self.socket = Some(socket);
@@ -123,7 +126,8 @@ impl CanInterface for SocketCanInterface {
                 .ok_or("Failed to create CAN frame")?
         };
 
-        socket.write_frame(&socketcan_frame)
+        socket
+            .write_frame(&socketcan_frame)
             .map_err(|e| format!("Failed to send frame: {}", e))?;
 
         log::trace!(
@@ -185,12 +189,14 @@ impl CanInterface for SocketCanInterface {
         match filter {
             Some(f) => {
                 let can_filter = socketcan::CanFilter::new(f.id, f.mask);
-                socket.set_filters(&[can_filter])
+                socket
+                    .set_filters(&[can_filter])
                     .map_err(|e| format!("Failed to set filter: {}", e))?;
             }
             None => {
                 // Clear filters by setting an empty filter list
-                socket.set_filters(&[])
+                socket
+                    .set_filters(&[])
                     .map_err(|e| format!("Failed to clear filters: {}", e))?;
             }
         }

@@ -2,20 +2,20 @@
 
 use crate::core::bus_stats::BusStats;
 use crate::core::channel::{Channel, ChannelConfig, ChannelState};
-use crate::core::message::{CanFrame, FramePayload};
-use crate::core::trace_logger::{TraceLogger, TraceLoggerConfig, TraceFormat};
-use crate::core::trace_player::PlaybackState;
-use crate::core::dbc::{DbcParser, SymParser, DecodedSignal};
+use crate::core::dbc::{DbcParser, DecodedSignal, SymParser};
 use crate::core::filter::FilterSet;
+use crate::core::message::{CanFrame, FramePayload};
+use crate::core::trace_logger::{TraceFormat, TraceLogger, TraceLoggerConfig};
+use crate::core::trace_player::PlaybackState;
 use crate::hal::traits::{enumerate_interfaces, BusState, InterfaceInfo};
 use crate::AppState;
 use parking_lot::RwLock;
-use std::path::PathBuf;
-use std::sync::Arc;
-use tauri::{AppHandle, Emitter, State};
-use std::time::Duration;
 use serde::{Deserialize, Serialize};
 use std::fs;
+use std::path::PathBuf;
+use std::sync::Arc;
+use std::time::Duration;
+use tauri::{AppHandle, Emitter, State};
 
 /// Maximum frames drained from a channel per receive-pump tick.
 const RX_BATCH_SIZE: usize = 2048;
@@ -74,7 +74,12 @@ async fn connect_channel_impl(
     );
     spawn_stats_loop(channel.clone(), app.clone(), channel_id.clone(), bitrate);
 
-    log::info!("Connected channel {} to {} at {} bps", channel_id, interface_id, bitrate);
+    log::info!(
+        "Connected channel {} to {} at {} bps",
+        channel_id,
+        interface_id,
+        bitrate
+    );
     Ok(())
 }
 
@@ -244,12 +249,9 @@ pub async fn disconnect_channel(
 
 /// Send a CAN message
 #[tauri::command]
-pub async fn send_message(
-    state: State<'_, AppState>,
-    frame: FramePayload,
-) -> Result<(), String> {
+pub async fn send_message(state: State<'_, AppState>, frame: FramePayload) -> Result<(), String> {
     log::debug!("send_message called with frame ID: 0x{:X}", frame.id);
-    
+
     let channel = {
         let mut manager = state.channel_manager.write();
         // Use channel from frame if provided, otherwise use active channel
@@ -289,7 +291,10 @@ pub async fn send_message(
         tx_frame
     };
 
-    log::debug!("Frame sent, batching event with timestamp {}", sent_frame.timestamp);
+    log::debug!(
+        "Frame sent, batching event with timestamp {}",
+        sent_frame.timestamp
+    );
 
     // Queue the sent frame for the frontend
     state.frame_batcher.push(sent_frame);
@@ -463,7 +468,10 @@ pub async fn get_periodic_tx_counts(
     Ok(jobs
         .iter()
         .map(|(id, job)| {
-            (id.clone(), job.count.load(std::sync::atomic::Ordering::Relaxed))
+            (
+                id.clone(),
+                job.count.load(std::sync::atomic::Ordering::Relaxed),
+            )
         })
         .collect())
 }
@@ -614,26 +622,38 @@ pub async fn load_trace(
     let bus_to_channel = if let Some(map) = bus_to_channel_map {
         log::info!("Using provided bus-to-channel mapping (names): {:?}", map);
         log::info!("Channel name-to-ID mapping: {:?}", channel_name_to_id_map);
-        
+
         // Convert string keys to u8 and resolve channel names to IDs
         let mut resolved_map = std::collections::HashMap::new();
         for (bus_num_str, channel_name) in map.iter() {
             // Parse bus number from string key
-            let bus_num = bus_num_str.parse::<u8>()
+            let bus_num = bus_num_str
+                .parse::<u8>()
                 .map_err(|e| format!("Invalid bus number '{}': {}", bus_num_str, e))?;
-            
+
             // If channel names are provided, resolve them to channel IDs
             if let Some(ref name_to_id) = channel_name_to_id_map {
                 if let Some(channel_id) = name_to_id.get(channel_name) {
                     resolved_map.insert(bus_num, channel_id.clone());
-                    log::info!("Resolved bus {} -> channel name '{}' -> channel ID '{}'", bus_num, channel_name, channel_id);
+                    log::info!(
+                        "Resolved bus {} -> channel name '{}' -> channel ID '{}'",
+                        bus_num,
+                        channel_name,
+                        channel_id
+                    );
                 } else {
-                    log::warn!("Channel name '{}' not found in name-to-ID mapping, using name as-is", channel_name);
+                    log::warn!(
+                        "Channel name '{}' not found in name-to-ID mapping, using name as-is",
+                        channel_name
+                    );
                     resolved_map.insert(bus_num, channel_name.clone());
                 }
             } else {
                 // No name-to-ID mapping provided, assume values are already channel IDs
-                log::warn!("No name-to-ID mapping provided, using channel name '{}' as channel ID", channel_name);
+                log::warn!(
+                    "No name-to-ID mapping provided, using channel name '{}' as channel ID",
+                    channel_name
+                );
                 resolved_map.insert(bus_num, channel_name.clone());
             }
         }
@@ -644,12 +664,12 @@ pub async fn load_trace(
         // This ensures trace frames use the same channel IDs that signals are selected with
         let dbc_databases = state.dbc_databases.read();
         let mut mapping = std::collections::HashMap::new();
-        
+
         // Use DBC database channel IDs directly (these are what signals are selected with)
         // Sort them to ensure consistent ordering (by channel ID string)
         let mut dbc_channel_ids: Vec<_> = dbc_databases.keys().cloned().collect();
         dbc_channel_ids.sort(); // Sort for consistent ordering
-        
+
         if !dbc_channel_ids.is_empty() {
             // Map bus number (1-indexed) to DBC channel ID
             // Bus 1 -> first DBC channel, Bus 2 -> second DBC channel, etc.
@@ -667,7 +687,7 @@ pub async fn load_trace(
                 log::debug!("Mapping bus {} -> channel {} (no DBC)", idx + 1, channel_id);
             }
         }
-        
+
         log::info!("Auto-generated bus to channel mapping: {:?}", mapping);
         if mapping.is_empty() {
             log::warn!("No channels found for bus-to-channel mapping!");
@@ -677,17 +697,23 @@ pub async fn load_trace(
         }
     };
 
-    log::info!("Passing bus-to-channel mapping to trace player: {:?}", bus_to_channel);
-    
+    log::info!(
+        "Passing bus-to-channel mapping to trace player: {:?}",
+        bus_to_channel
+    );
+
     // Create progress callback to emit events
     let app_clone = app.clone();
-    let progress_callback: Option<Box<dyn Fn(usize) + Send + Sync>> = Some(Box::new(move |line_num| {
-        let _ = app_clone.emit("trace-load-progress", line_num);
-    }));
-    
+    let progress_callback: Option<Box<dyn Fn(usize) + Send + Sync>> =
+        Some(Box::new(move |line_num| {
+            let _ = app_clone.emit("trace-load-progress", line_num);
+        }));
+
     let count = {
         let mut player = state.trace_player.write().await;
-        let result = player.load_file(PathBuf::from(file_path), bus_to_channel, progress_callback).await;
+        let result = player
+            .load_file(PathBuf::from(file_path), bus_to_channel, progress_callback)
+            .await;
         match result {
             Ok(c) => {
                 log::info!("Successfully loaded {} frames from trace file", c);
@@ -699,18 +725,16 @@ pub async fn load_trace(
             }
         }
     }?;
-    
+
     // Emit completion event
     let _ = app.emit("trace-load-complete", count);
-    
+
     Ok(count)
 }
 
 /// Start trace playback
 #[tauri::command]
-pub async fn start_playback(
-    state: State<'_, AppState>,
-) -> Result<(), String> {
+pub async fn start_playback(state: State<'_, AppState>) -> Result<(), String> {
     {
         let mut player = state.trace_player.write().await;
         player.start()?;
@@ -767,10 +791,7 @@ pub async fn resume_playback(state: State<'_, AppState>) -> Result<(), String> {
 
 /// Set playback speed
 #[tauri::command]
-pub async fn set_playback_speed(
-    state: State<'_, AppState>,
-    speed: f64,
-) -> Result<(), String> {
+pub async fn set_playback_speed(state: State<'_, AppState>, speed: f64) -> Result<(), String> {
     let mut player = state.trace_player.write().await;
     player.set_speed(speed);
     Ok(())
@@ -778,9 +799,7 @@ pub async fn set_playback_speed(
 
 /// Get playback state
 #[tauri::command]
-pub async fn get_playback_state(
-    state: State<'_, AppState>,
-) -> Result<String, String> {
+pub async fn get_playback_state(state: State<'_, AppState>) -> Result<String, String> {
     let player = state.trace_player.read().await;
     Ok(match player.get_state() {
         PlaybackState::Stopped => "stopped".to_string(),
@@ -791,9 +810,7 @@ pub async fn get_playback_state(
 
 /// Get all frames from loaded trace (for immediate decoding)
 #[tauri::command]
-pub async fn get_trace_frames(
-    state: State<'_, AppState>,
-) -> Result<Vec<CanFrame>, String> {
+pub async fn get_trace_frames(state: State<'_, AppState>) -> Result<Vec<CanFrame>, String> {
     let player = state.trace_player.read().await;
     Ok(player.get_all_frames())
 }
@@ -811,12 +828,12 @@ pub async fn load_dbc(
         DbcParser::parse_file(&file_path)?
     };
     let message_count = db.messages.len();
-    
+
     {
         let mut databases = state.dbc_databases.write();
         databases.insert(channel_id, db);
     }
-    
+
     Ok(message_count)
 }
 
@@ -832,7 +849,7 @@ pub async fn decode_message(
         let databases = state.dbc_databases.read();
         databases.get(&channel_id).cloned()
     };
-    
+
     if let Some(db) = db {
         Ok(db.decode_message(message_id, &data))
     } else {
@@ -859,11 +876,11 @@ pub async fn decode_messages_batch(
         let db_guard = state.dbc_databases.read();
         db_guard.clone()
     };
-    
+
     // Use rayon for parallel processing
     // Rayon automatically uses all available CPU cores
     use rayon::prelude::*;
-    
+
     let results: Vec<Vec<DecodedSignal>> = requests
         .par_iter()
         .map(|req| {
@@ -874,7 +891,7 @@ pub async fn decode_messages_batch(
             }
         })
         .collect();
-    
+
     Ok(results)
 }
 
@@ -892,7 +909,9 @@ pub async fn get_message_info(
 
     if let Some(db) = db {
         if let Some(message) = db.get_message(message_id) {
-            Ok(Some(serde_json::to_value(message).map_err(|e| e.to_string())?))
+            Ok(Some(
+                serde_json::to_value(message).map_err(|e| e.to_string())?,
+            ))
         } else {
             Ok(None)
         }
@@ -913,7 +932,14 @@ pub async fn get_message_by_name(
     let Some(db) = databases.get(&channel_id) else {
         return Ok(None);
     };
-    let Some(message) = db.messages.values().find(|m| m.name == name) else {
+    // ID ranges are stored once per ID under the same name. Prefer the lowest
+    // ID so the transmit editor gets a stable range start.
+    let Some(message) = db
+        .messages
+        .values()
+        .filter(|m| m.name == name)
+        .min_by_key(|m| m.id)
+    else {
         return Ok(None);
     };
 
@@ -1003,12 +1029,13 @@ pub async fn get_all_signals(
         let db_map = state.dbc_databases.read();
         db_map.clone()
     };
-    
+
     let mut result = Vec::new();
-    
+
     for (channel_id, db) in databases.iter() {
         for (message_id, message) in db.messages.iter() {
-            let signals: Vec<SignalInfo> = message.signals
+            let signals: Vec<SignalInfo> = message
+                .signals
                 .iter()
                 .map(|signal| {
                     let value_type = match signal.value_type {
@@ -1024,7 +1051,7 @@ pub async fn get_all_signals(
                     }
                 })
                 .collect();
-            
+
             if !signals.is_empty() {
                 result.push(MessageWithSignals {
                     channel_id: channel_id.clone(),
@@ -1035,7 +1062,7 @@ pub async fn get_all_signals(
             }
         }
     }
-    
+
     Ok(result)
 }
 
@@ -1173,8 +1200,7 @@ pub async fn save_project(
     let json = serde_json::to_string_pretty(&project)
         .map_err(|e| format!("Failed to serialize project: {}", e))?;
 
-    fs::write(&file_path, json)
-        .map_err(|e| format!("Failed to write project file: {}", e))?;
+    fs::write(&file_path, json).map_err(|e| format!("Failed to write project file: {}", e))?;
 
     log::info!("Project saved to {}", file_path);
     Ok(())
@@ -1182,18 +1208,13 @@ pub async fn save_project(
 
 /// Load project from file (accepts 1.0 and 2.0 formats)
 #[tauri::command]
-pub async fn load_project(
-    file_path: String,
-) -> Result<ProjectFile, String> {
+pub async fn load_project(file_path: String) -> Result<ProjectFile, String> {
     let contents = fs::read_to_string(&file_path)
         .map_err(|e| format!("Failed to read project file: {}", e))?;
 
     let raw: serde_json::Value = serde_json::from_str(&contents)
         .map_err(|e| format!("Failed to parse project file: {}", e))?;
-    let version = raw
-        .get("version")
-        .and_then(|v| v.as_str())
-        .unwrap_or("1.0");
+    let version = raw.get("version").and_then(|v| v.as_str()).unwrap_or("1.0");
 
     let project: ProjectFile = if version.starts_with("2") {
         serde_json::from_value(raw)

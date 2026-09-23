@@ -8,8 +8,8 @@ pub struct DbcParser;
 impl DbcParser {
     /// Parse a DBC file from a path
     pub fn parse_file<P: AsRef<Path>>(path: P) -> Result<DbcDatabase, String> {
-        let content = fs::read_to_string(path)
-            .map_err(|e| format!("Failed to read DBC file: {}", e))?;
+        let content =
+            fs::read_to_string(path).map_err(|e| format!("Failed to read DBC file: {}", e))?;
         Self::parse(&content)
     }
 
@@ -77,10 +77,13 @@ impl DbcParser {
             for signal in message.signals.iter_mut() {
                 if let Some(values) = value_tables.remove(&signal.name) {
                     let vt_name = signal.name.clone();
-                    db.value_tables.insert(vt_name.clone(), ValueTable {
-                        name: vt_name.clone(),
-                        values,
-                    });
+                    db.value_tables.insert(
+                        vt_name.clone(),
+                        ValueTable {
+                            name: vt_name.clone(),
+                            values,
+                        },
+                    );
                     signal.value_table = Some(vt_name);
                 }
             }
@@ -141,7 +144,7 @@ impl DbcParser {
         };
         let factor = caps.get(6)?.as_str().parse::<f64>().ok()?;
         let offset = caps.get(7)?.as_str().parse::<f64>().ok()?;
-        
+
         let (min, max) = if let Some(range) = caps.get(8) {
             let range_str = range.as_str();
             let parts: Vec<&str> = range_str.split('|').collect();
@@ -173,6 +176,8 @@ impl DbcParser {
             receivers,
             comment: None,
             value_table: None,
+            is_multiplexer: false,
+            multiplex: None,
         })
     }
 
@@ -222,12 +227,16 @@ impl DbcParser {
         } else if line.contains("SG_") {
             let re = regex::Regex::new(r#"CM_\s+SG_\s+(\d+)\s+(\w+)\s+"([^"]+)";"#).ok();
             if let Some(caps) = re.and_then(|r| r.captures(line)) {
-                if let (Some(id_str), Some(signal_name), Some(comment)) = 
-                    (caps.get(1), caps.get(2), caps.get(3)) {
+                if let (Some(id_str), Some(signal_name), Some(comment)) =
+                    (caps.get(1), caps.get(2), caps.get(3))
+                {
                     if let Ok(id) = id_str.as_str().parse::<u32>() {
                         if let Some(message) = db.messages.get_mut(&id) {
-                            if let Some(signal) = message.signals.iter_mut()
-                                .find(|s| s.name == signal_name.as_str()) {
+                            if let Some(signal) = message
+                                .signals
+                                .iter_mut()
+                                .find(|s| s.name == signal_name.as_str())
+                            {
                                 signal.comment = Some(comment.as_str().to_string());
                             }
                         }
@@ -245,4 +254,3 @@ impl DbcParser {
             .collect()
     }
 }
-

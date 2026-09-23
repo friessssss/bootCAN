@@ -61,8 +61,24 @@ export function TransmitEditor({ row, onClose }: TransmitEditorProps) {
     if (!netId) return [];
     const map = messageNames.get(netId);
     if (!map) return [];
-    return Array.from(map.entries())
-      .map(([id, msgName]) => ({ id, name: msgName }))
+    // An ID range (640h-643h) is stored once per ID. Collapse those to a
+    // single choice labeled with the span, using the lowest ID as the value.
+    const groups = new Map<string, number[]>();
+    for (const [id, msgName] of map) {
+      const ids = groups.get(msgName);
+      if (ids) ids.push(id);
+      else groups.set(msgName, [id]);
+    }
+    return Array.from(groups.entries())
+      .map(([name, ids]) => {
+        ids.sort((a, b) => a - b);
+        const contiguous = ids[ids.length - 1] - ids[0] + 1 === ids.length;
+        const idLabel =
+          ids.length > 1 && contiguous
+            ? `0x${ids[0].toString(16).toUpperCase()}-0x${ids[ids.length - 1].toString(16).toUpperCase()}`
+            : `0x${ids[0].toString(16).toUpperCase()}`;
+        return { id: ids[0], name, label: `${name} (${idLabel})` };
+      })
       .sort((a, b) => a.name.localeCompare(b.name));
   }, [netId, messageNames]);
 
@@ -90,8 +106,11 @@ export function TransmitEditor({ row, onClose }: TransmitEditorProps) {
     [netId, dlc]
   );
 
-  /** Load a symbolic message definition and sync everything to it. */
-  const selectMessage = async (msgName: string) => {
+  /** Load a symbolic message definition and sync everything to it.
+   *  `preserveId` keeps an existing row's CAN ID when it already belongs to
+   *  this message (ID ranges share one name across several IDs).
+   */
+  const selectMessage = async (msgName: string, preserveId?: number) => {
     if (!netId || !msgName) return;
     try {
       const def = await invoke<MessageDefResponse | null>("get_message_by_name", {
@@ -99,10 +118,14 @@ export function TransmitEditor({ row, onClose }: TransmitEditorProps) {
         name: msgName,
       });
       if (!def) return;
+      const id =
+        preserveId != null && messageNames.get(netId)?.get(preserveId) === def.message.name
+          ? preserveId
+          : def.message.id;
       setMessageDef(def);
       setName(def.message.name);
-      setCanIdHex(def.message.id.toString(16).toUpperCase());
-      setIsExtended(def.message.id > 0x7ff);
+      setCanIdHex(id.toString(16).toUpperCase());
+      setIsExtended(id > 0x7ff);
       setDlc(def.message.dlc);
       await decodeIntoSignals(data, def);
       setError(null);
@@ -115,7 +138,7 @@ export function TransmitEditor({ row, onClose }: TransmitEditorProps) {
   useEffect(() => {
     if (row && netId) {
       const msgName = messageNames.get(netId)?.get(row.canId);
-      if (msgName) selectMessage(msgName);
+      if (msgName) selectMessage(msgName, row.canId);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -353,8 +376,8 @@ export function TransmitEditor({ row, onClose }: TransmitEditorProps) {
                       : "Select a message…"}
                   </option>
                   {symbolNames.map((m) => (
-                    <option key={m.id} value={m.name}>
-                      {m.name} (0x{m.id.toString(16).toUpperCase()})
+                    <option key={m.name} value={m.name}>
+                      {m.label}
                     </option>
                   ))}
                 </select>

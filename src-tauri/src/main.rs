@@ -4,4 +4,3 @@
 fn main() {
     bootcan_lib::run()
 }
-

@@ -173,9 +173,9 @@ impl CanInterface for PcanInterface {
         if self.connected {
             return Err("Already connected".to_string());
         }
-        let handle = self.handle.ok_or_else(|| {
-            format!("Invalid PCAN interface id: {}", self.id)
-        })?;
+        let handle = self
+            .handle
+            .ok_or_else(|| format!("Invalid PCAN interface id: {}", self.id))?;
         let api = PcbusbApi::get()?;
         let btr = PcanBitrate::from_bps(bitrate)?;
 
@@ -217,7 +217,14 @@ impl CanInterface for PcanInterface {
             .name(format!("pcan-rx-{}", self.id))
             .spawn(move || {
                 reader_loop(
-                    handle, event_fd, tx, shutdown, reader_dead, bus_state, dropped, iface_id,
+                    handle,
+                    event_fd,
+                    tx,
+                    shutdown,
+                    reader_dead,
+                    bus_state,
+                    dropped,
+                    iface_id,
                 );
             })
             .map_err(|e| format!("Failed to spawn PCAN reader thread: {}", e))?;
@@ -388,11 +395,7 @@ fn reader_loop(
             if !read_ok {
                 consecutive_errors += 1;
                 if consecutive_errors == 1 {
-                    log::warn!(
-                        "PCAN {} read error: {}",
-                        iface_id,
-                        api.error_text(status)
-                    );
+                    log::warn!("PCAN {} read error: {}", iface_id, api.error_text(status));
                 }
                 if consecutive_errors >= MAX_CONSECUTIVE_READ_ERRORS {
                     log::error!(
@@ -465,7 +468,13 @@ fn wait_for_data(event_fd: Option<i32>) {
             };
             // Result deliberately ignored: on wakeup, timeout, or EINTR we
             // drain the queue either way.
-            libc::select(fd + 1, &mut readfds, std::ptr::null_mut(), std::ptr::null_mut(), &mut tv);
+            libc::select(
+                fd + 1,
+                &mut readfds,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                &mut tv,
+            );
         },
         None => std::thread::sleep(std::time::Duration::from_millis(1)),
     }
@@ -492,15 +501,18 @@ pub fn enumerate_devices() -> Vec<InterfaceInfo> {
             Ok(c) => c,
             Err(_) => continue,
         };
-        let attached =
-            cond & (pcbusb::PCAN_CHANNEL_AVAILABLE | pcbusb::PCAN_CHANNEL_OCCUPIED) != 0;
+        let attached = cond & (pcbusb::PCAN_CHANNEL_AVAILABLE | pcbusb::PCAN_CHANNEL_OCCUPIED) != 0;
         if !attached {
             continue;
         }
         let n = handle - 0x50;
 
         let hardware_name = api
-            .get_string(handle, pcbusb::PCAN_HARDWARE_NAME, pcbusb::MAX_LENGTH_HARDWARE_NAME)
+            .get_string(
+                handle,
+                pcbusb::PCAN_HARDWARE_NAME,
+                pcbusb::MAX_LENGTH_HARDWARE_NAME,
+            )
             .ok()
             .filter(|s| !s.is_empty());
         let device_id = api.get_u32(handle, pcbusb::PCAN_DEVICE_ID).ok();
@@ -550,18 +562,36 @@ mod tests {
 
     #[test]
     fn bitrate_mapping() {
-        assert_eq!(PcanBitrate::from_bps(500_000).unwrap(), PcanBitrate::Baud500K);
-        assert_eq!(PcanBitrate::from_bps(250_000).unwrap(), PcanBitrate::Baud250K);
-        assert_eq!(PcanBitrate::from_bps(1_000_000).unwrap(), PcanBitrate::Baud1M);
+        assert_eq!(
+            PcanBitrate::from_bps(500_000).unwrap(),
+            PcanBitrate::Baud500K
+        );
+        assert_eq!(
+            PcanBitrate::from_bps(250_000).unwrap(),
+            PcanBitrate::Baud250K
+        );
+        assert_eq!(
+            PcanBitrate::from_bps(1_000_000).unwrap(),
+            PcanBitrate::Baud1M
+        );
         assert!(PcanBitrate::from_bps(123_456).is_err());
     }
 
     #[test]
     fn status_to_state() {
         assert_eq!(state_from_status(pcbusb::PCAN_ERROR_OK), STATE_ACTIVE);
-        assert_eq!(state_from_status(pcbusb::PCAN_ERROR_BUSLIGHT), STATE_WARNING);
-        assert_eq!(state_from_status(pcbusb::PCAN_ERROR_BUSHEAVY), STATE_WARNING);
-        assert_eq!(state_from_status(pcbusb::PCAN_ERROR_BUSPASSIVE), STATE_PASSIVE);
+        assert_eq!(
+            state_from_status(pcbusb::PCAN_ERROR_BUSLIGHT),
+            STATE_WARNING
+        );
+        assert_eq!(
+            state_from_status(pcbusb::PCAN_ERROR_BUSHEAVY),
+            STATE_WARNING
+        );
+        assert_eq!(
+            state_from_status(pcbusb::PCAN_ERROR_BUSPASSIVE),
+            STATE_PASSIVE
+        );
         assert_eq!(state_from_status(pcbusb::PCAN_ERROR_BUSOFF), STATE_BUSOFF);
     }
 }
