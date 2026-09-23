@@ -2,7 +2,7 @@
 
 A modern, cross-platform CAN/CAN FD network monitoring and analysis tool built with Rust and React.
 
-**Version 0.3.0**
+**Version 0.3.1**
 
 ## Features
 

@@ -199,7 +199,7 @@ export function Toolbar() {
       </div>
 
       {/* Right - Version */}
-      <div className="text-xs text-can-text-muted ml-auto shrink-0 hidden xl:block">v0.3.0</div>
+      <div className="text-xs text-can-text-muted ml-auto shrink-0 hidden xl:block">v0.3.1</div>
     </header>
   );
 }
