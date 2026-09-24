@@ -4,5 +4,7 @@ pub mod channel;
 pub mod dbc;
 pub mod filter;
 pub mod message;
+pub mod trace_buffer;
+pub mod trace_export;
 pub mod trace_logger;
 pub mod trace_player;

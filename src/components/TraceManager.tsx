@@ -1,24 +1,14 @@
-import { useCanStore, useAnyConnected } from "../stores/canStore";
-import { open, save } from "@tauri-apps/plugin-dialog";
-import {
-  PlayIcon,
-  PauseIcon,
-  StopIcon,
-  FolderOpenIcon,
-  ArrowDownTrayIcon,
-} from "./icons";
+import { useCanStore } from "../stores/canStore";
+import { open } from "@tauri-apps/plugin-dialog";
+import { PlayIcon, PauseIcon, StopIcon, FolderOpenIcon } from "./icons";
 
 /** Compact trace logging + playback controls, shown above the trace list. */
 export function TraceManager() {
   const {
-    isLogging,
-    logFilePath,
     playbackState,
     playbackSpeed,
     loadedTraceFile,
     playbackFrameCount,
-    startLogging,
-    stopLogging,
     loadTrace,
     startPlayback,
     stopPlayback,
@@ -26,27 +16,6 @@ export function TraceManager() {
     resumePlayback,
     setPlaybackSpeed,
   } = useCanStore();
-  const anyConnected = useAnyConnected();
-
-  const handleStartLogging = async () => {
-    try {
-      const filePath = await save({
-        title: "Save Trace File",
-        filters: [
-          { name: "CSV", extensions: ["csv"] },
-          { name: "TRC", extensions: ["trc"] },
-        ],
-        defaultPath: `can_trace_${new Date().toISOString().replace(/[:.]/g, "-")}.csv`,
-      });
-
-      if (filePath) {
-        const format = filePath.endsWith(".trc") ? "trc" : "csv";
-        await startLogging(filePath, format);
-      }
-    } catch (error) {
-      console.error("Failed to start logging:", error);
-    }
-  };
 
   const handleLoadTrace = async () => {
     try {
@@ -79,30 +48,6 @@ export function TraceManager() {
 
   return (
     <div className="flex items-center gap-2 px-3 py-1.5 w-full flex-wrap">
-      {/* Logging to file */}
-      {!isLogging ? (
-        <button
-          onClick={handleStartLogging}
-          className="btn btn-secondary h-6 text-xs flex items-center gap-1"
-          disabled={!anyConnected}
-          title="Log incoming frames to a CSV/TRC file"
-        >
-          <ArrowDownTrayIcon className="w-3 h-3" />
-          Log to File
-        </button>
-      ) : (
-        <button
-          onClick={() => stopLogging().catch(console.error)}
-          className="btn btn-danger h-6 text-xs flex items-center gap-1"
-          title={logFilePath ?? undefined}
-        >
-          <StopIcon className="w-3 h-3" />
-          Stop Logging
-        </button>
-      )}
-
-      <div className="w-px h-4 bg-can-border" />
-
       {/* Playback */}
       <button
         onClick={handleLoadTrace}

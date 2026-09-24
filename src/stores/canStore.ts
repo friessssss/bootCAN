@@ -54,14 +54,18 @@ interface CanState {
   // Symbolic names: net id -> (message id -> name)
   messageNames: Map<string, Map<number, string>>;
 
-  // Recording state for trace
+  // Background trace. Recording continues while Overview or Plot is open.
   isRecording: boolean;
-  recordingStartTime: number | null;
-
-  // Trace logging state
-  isLogging: boolean;
-  logFilePath: string | null;
-  logFormat: "csv" | "trc";
+  /** Frames retained in the backend buffer (may exceed the on-screen window). */
+  traceFrameCount: number;
+  traceTruncated: boolean;
+  /** Bumped on start/clear so stale UI batches are ignored. */
+  traceEpoch: number;
+  /** Next absolute frame index the on-screen list has consumed. */
+  traceHighWater: number;
+  /** "live" follows the background buffer; "file" is a loaded trace. */
+  traceSource: "live" | "file";
+  traceNotice: string | null;
 
   // Trace playback state
   playbackState: "stopped" | "playing" | "paused";
@@ -91,7 +95,7 @@ interface CanState {
   initializeBackend: () => Promise<void>;
 
   // Messages
-  clearMessages: () => void;
+  clearMessages: () => Promise<void>;
   togglePause: () => void;
   setIdFilter: (filter: string) => void;
   setMonitorSort: (sort: MonitorSort) => void;
@@ -100,12 +104,9 @@ interface CanState {
   setViewTab: (tab: "monitor" | "plot") => void;
 
   // Recording
-  toggleRecording: () => void;
-  stopRecording: () => void;
-
-  // Trace logging
-  startLogging: (filePath: string, format: "csv" | "trc") => Promise<void>;
-  stopLogging: () => Promise<void>;
+  toggleRecording: () => Promise<void>;
+  stopRecording: () => Promise<void>;
+  exportTrace: (filePath: string, format: "trc" | "mcap" | "csv") => Promise<number>;
 
   // Trace playback
   loadTrace: (filePath: string) => Promise<number>;
@@ -159,11 +160,48 @@ interface CanState {
 
 // Event listener cleanup
 let unlistenBatch: UnlistenFn | null = null;
+let unlistenTrace: UnlistenFn | null = null;
 let unlistenStats: UnlistenFn | null = null;
 let unlistenInterfaces: UnlistenFn | null = null;
 let unlistenChannelError: UnlistenFn | null = null;
 let txCountTimer: ReturnType<typeof setInterval> | null = null;
 let isInitialized = false;
+
+export const TRACE_WINDOW = 20_000;
+
+export interface TraceStatus {
+  recording: boolean;
+  frameCount: number;
+  truncated: boolean;
+  epoch: number;
+}
+
+export interface TraceWindow {
+  recording: boolean;
+  frameCount: number;
+  truncated: boolean;
+  epoch: number;
+  frames: CanFrame[];
+}
+
+interface TraceUiBatch {
+  epoch: number;
+  startIndex: number;
+  frames: CanFrame[];
+}
+
+/** Bus numbers written into PEAK TRC files and used again when those files are loaded. */
+export function traceBuses(nets: Net[]): { channelId: string; name: string; bus: number }[] {
+  const used = new Set<number>();
+  return nets.map((net, index) => {
+    const match = net.name.match(/\d+/);
+    let bus = match ? parseInt(match[0], 10) : index + 1;
+    if (!Number.isFinite(bus) || bus < 1 || bus > 255) bus = index + 1 || 1;
+    while (used.has(bus)) bus = bus >= 255 ? 1 : bus + 1;
+    used.add(bus);
+    return { channelId: net.id, name: net.name, bus };
+  });
+}
 
 function rowToFramePayload(row: TransmitRow) {
   return {
@@ -183,17 +221,19 @@ export const useCanStore = create<CanState>((set, get) => ({
   filters: [],
   traceMessages: [],
   monitorMessages: new Map<string, MonitorEntry>(),
-  maxMessages: 10000,
+  maxMessages: TRACE_WINDOW,
   isPaused: false,
   monitorSort: { key: "id", dir: "asc" },
   idFilter: "",
   expandedRows: new Set<string>(),
   messageNames: new Map<string, Map<number, string>>(),
   isRecording: false,
-  recordingStartTime: null,
-  isLogging: false,
-  logFilePath: null,
-  logFormat: "csv",
+  traceFrameCount: 0,
+  traceTruncated: false,
+  traceEpoch: 0,
+  traceHighWater: 0,
+  traceSource: "live",
+  traceNotice: null,
   playbackState: "stopped",
   playbackSpeed: 1.0,
   loadedTraceFile: null,
@@ -289,20 +329,7 @@ export const useCanStore = create<CanState>((set, get) => ({
             }
           }
 
-          let newTrace = s.traceMessages;
-          let newStart = s.recordingStartTime;
-          if (s.isRecording && !isTracePlayback) {
-            if (newStart === null) newStart = frames[0].timestamp;
-            const base = newStart;
-            const rebased = frames.map((f) => ({ ...f, timestamp: f.timestamp - base }));
-            newTrace = [...s.traceMessages, ...rebased].slice(-s.maxMessages);
-          }
-
-          return {
-            monitorMessages: newMonitor,
-            traceMessages: newTrace,
-            recordingStartTime: newStart,
-          };
+          return { monitorMessages: newMonitor };
         });
 
         // Plot decoding: one batched invoke per flush
@@ -351,6 +378,31 @@ export const useCanStore = create<CanState>((set, get) => ({
         }
       });
 
+      // Background trace tail. Independent of the receive-list filter and of
+      // which window is open.
+      unlistenTrace = await listen<TraceUiBatch>("trace-frame-batch", (event) => {
+        const { epoch, startIndex, frames } = event.payload;
+        if (frames.length === 0) return;
+        const state = get();
+        if (state.isPaused || state.traceSource !== "live" || epoch !== state.traceEpoch) return;
+        set((s) => {
+          if (s.isPaused || s.traceSource !== "live" || epoch !== s.traceEpoch) return s;
+          const end = startIndex + frames.length;
+          if (startIndex > s.traceHighWater) {
+            return {
+              traceMessages: frames.slice(-s.maxMessages),
+              traceHighWater: end,
+            };
+          }
+          const skip = Math.max(0, s.traceHighWater - startIndex);
+          if (skip >= frames.length) return s;
+          return {
+            traceMessages: [...s.traceMessages, ...frames.slice(skip)].slice(-s.maxMessages),
+            traceHighWater: end,
+          };
+        });
+      });
+
       // Per-net bus statistics
       unlistenStats = await listen<BusStats & { channelId: string }>("bus-stats", (event) => {
         const { channelId, ...stats } = event.payload;
@@ -361,19 +413,29 @@ export const useCanStore = create<CanState>((set, get) => ({
         });
       });
 
-      // Poll cyclic transmit counts while jobs run
+      // Poll cyclic transmit counts and the background trace size.
       txCountTimer = setInterval(async () => {
         const rows = get().transmitRows;
-        if (!rows.some((r) => r.backendJobId)) return;
+        if (rows.some((r) => r.backendJobId)) {
+          try {
+            const counts = await invoke<Record<string, u64Number>>("get_periodic_tx_counts");
+            set((s) => ({
+              transmitRows: s.transmitRows.map((r) =>
+                r.backendJobId && counts[r.backendJobId] !== undefined
+                  ? { ...r, count: r.manualCount + counts[r.backendJobId] }
+                  : r
+              ),
+            }));
+          } catch {
+            // ignore
+          }
+        }
         try {
-          const counts = await invoke<Record<string, u64Number>>("get_periodic_tx_counts");
-          set((s) => ({
-            transmitRows: s.transmitRows.map((r) =>
-              r.backendJobId && counts[r.backendJobId] !== undefined
-                ? { ...r, count: r.manualCount + counts[r.backendJobId] }
-                : r
-            ),
-          }));
+          const status = await invoke<TraceStatus>("get_trace_status");
+          set({
+            traceFrameCount: status.frameCount,
+            traceTruncated: status.truncated,
+          });
         } catch {
           // ignore
         }
@@ -384,14 +446,48 @@ export const useCanStore = create<CanState>((set, get) => ({
     }
   },
 
-  clearMessages: () =>
+  clearMessages: async () => {
+    if (get().playbackState !== "stopped") {
+      await invoke("stop_playback");
+    }
+    const status = await invoke<TraceStatus>("clear_trace");
     set({
       traceMessages: [],
       monitorMessages: new Map<string, MonitorEntry>(),
       expandedRows: new Set<string>(),
-    }),
+      traceEpoch: status.epoch,
+      traceHighWater: 0,
+      traceFrameCount: 0,
+      traceTruncated: false,
+      traceSource: "live",
+      loadedTraceFile: null,
+      playbackFrameCount: 0,
+      playbackState: "stopped",
+      traceNotice: null,
+    });
+  },
 
-  togglePause: () => set((s) => ({ isPaused: !s.isPaused })),
+  togglePause: () => {
+    const next = !get().isPaused;
+    set({ isPaused: next });
+    if (!next && get().traceSource === "live") {
+      invoke<TraceWindow>("get_trace_window", { limit: TRACE_WINDOW })
+        .then((window) => {
+          set((s) => {
+            if (s.traceSource !== "live" || window.epoch !== s.traceEpoch) return s;
+            return {
+              traceMessages: window.frames,
+              traceHighWater: window.frameCount,
+              traceFrameCount: window.frameCount,
+              traceTruncated: window.truncated,
+            };
+          });
+        })
+        .catch(() => {
+          // The live batches will keep filling the window.
+        });
+    }
+  },
   setIdFilter: (filter: string) => set({ idFilter: filter }),
   setMonitorSort: (sort) => set({ monitorSort: sort }),
   toggleRowExpanded: (key: string) =>
@@ -404,38 +500,72 @@ export const useCanStore = create<CanState>((set, get) => ({
   setViewMode: (mode) => set({ viewMode: mode }),
   setViewTab: (tab) => set({ viewTab: tab }),
 
-  toggleRecording: () => {
-    const state = get();
-    if (state.isRecording) {
-      set({ isRecording: false, recordingStartTime: null });
-    } else {
-      set({ isRecording: true, recordingStartTime: null, traceMessages: [] });
+  toggleRecording: async () => {
+    if (get().isRecording) {
+      await get().stopRecording();
+      return;
     }
+    if (get().playbackState !== "stopped") {
+      await invoke("stop_playback");
+    }
+    const status = await invoke<TraceStatus>("start_trace");
+    set({
+      isRecording: true,
+      traceEpoch: status.epoch,
+      traceMessages: [],
+      traceHighWater: 0,
+      traceFrameCount: 0,
+      traceTruncated: false,
+      traceSource: "live",
+      loadedTraceFile: null,
+      playbackFrameCount: 0,
+      playbackState: "stopped",
+      traceNotice: null,
+    });
   },
 
-  stopRecording: () => set({ isRecording: false, recordingStartTime: null }),
-
-  startLogging: async (filePath, format) => {
-    await invoke("start_logging", { filePath, format });
-    set({ isLogging: true, logFilePath: filePath, logFormat: format });
+  stopRecording: async () => {
+    await invoke("stop_trace");
+    const window = await invoke<TraceWindow>("get_trace_window", { limit: TRACE_WINDOW });
+    set({
+      isRecording: false,
+      traceSource: "live",
+      traceEpoch: window.epoch,
+      traceMessages: window.frames,
+      traceHighWater: window.frameCount,
+      traceFrameCount: window.frameCount,
+      traceTruncated: window.truncated,
+    });
   },
 
-  stopLogging: async () => {
-    await invoke("stop_logging");
-    set({ isLogging: false, logFilePath: null });
+  exportTrace: async (filePath, format) => {
+    const source =
+      get().isRecording || get().traceFrameCount > 0 ? "buffer" : "playback";
+    try {
+      const count = await invoke<number>("export_trace", {
+        filePath,
+        format,
+        buses: traceBuses(get().nets),
+        source,
+      });
+      set({ traceNotice: `Exported ${count.toLocaleString()} frames` });
+      return count;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      set({ traceNotice: message });
+      throw error;
+    }
   },
 
   loadTrace: async (filePath: string) => {
     const state = get();
-    // Map TRC bus numbers to nets: bus N -> Nth net (by name number when present)
+    // Map TRC bus numbers the same way export writes them.
     const busToChannelNameMap: Record<string, string> = {};
     const channelNameToIdMap: Record<string, string> = {};
-    state.nets.forEach((net, index) => {
-      channelNameToIdMap[net.name] = net.id;
-      const match = net.name.match(/\d+/);
-      const busNum = match ? parseInt(match[0], 10) : index + 1;
-      if (busNum > 0 && busNum <= 255) busToChannelNameMap[busNum.toString()] = net.name;
-    });
+    for (const bus of traceBuses(state.nets)) {
+      channelNameToIdMap[bus.name] = bus.channelId;
+      busToChannelNameMap[bus.bus.toString()] = bus.name;
+    }
 
     const count = await invoke<number>("load_trace", {
       filePath,
@@ -456,6 +586,7 @@ export const useCanStore = create<CanState>((set, get) => ({
       loadedTraceFile: filePath,
       playbackFrameCount: count,
       traceMessages: traceFrames,
+      traceSource: "file",
     });
     return count;
   },
@@ -896,6 +1027,8 @@ export const useNetName = () => {
 export const cleanupCanStore = () => {
   unlistenBatch?.();
   unlistenBatch = null;
+  unlistenTrace?.();
+  unlistenTrace = null;
   unlistenStats?.();
   unlistenStats = null;
   unlistenInterfaces?.();

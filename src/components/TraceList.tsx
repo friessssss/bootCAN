@@ -16,6 +16,8 @@ export function TraceList() {
   const messageNames = useCanStore((s) => s.messageNames);
   const nets = useCanStore(useShallow((s) => s.nets));
   const isRecording = useCanStore((s) => s.isRecording);
+  const traceFrameCount = useCanStore((s) => s.traceFrameCount);
+  const traceTruncated = useCanStore((s) => s.traceTruncated);
 
   const scrollRef = useRef<HTMLDivElement>(null);
   const [followTail, setFollowTail] = useState(true);
@@ -49,9 +51,14 @@ export function TraceList() {
         <span className="text-xs font-semibold uppercase tracking-wider text-can-text-secondary">
           Trace
           {isRecording && <span className="ml-2 text-can-accent-red normal-case">● recording</span>}
+          {traceTruncated && (
+            <span className="ml-2 text-can-accent-amber normal-case">buffer full</span>
+          )}
         </span>
         <span className="text-xs text-can-text-muted">
-          {traceMessages.length.toLocaleString()} frames
+          {traceFrameCount > traceMessages.length
+            ? `${traceFrameCount.toLocaleString()} captured`
+            : `${traceMessages.length.toLocaleString()} frames`}
         </span>
       </div>
 
@@ -73,7 +80,7 @@ export function TraceList() {
       <div ref={scrollRef} onScroll={handleScroll} className="flex-1 overflow-auto relative">
         {traceMessages.length === 0 ? (
           <div className="text-center py-10 text-can-text-muted text-sm">
-            No trace frames. Start recording or load a trace file.
+            No trace frames. Record keeps capturing while Receive/Transmit stays open, or load a trace file.
           </div>
         ) : (
           <div style={{ height: virtualizer.getTotalSize(), position: "relative" }}>

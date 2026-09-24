@@ -1,6 +1,7 @@
 use super::bus_stats::BusStats;
 use super::filter::FilterSet;
 use super::message::CanFrame;
+use super::trace_buffer::TraceRecorder;
 use crate::hal::traits::CanInterface;
 use crate::hal::virtual_can::VirtualCanInterface;
 use parking_lot::RwLock;
@@ -46,6 +47,9 @@ pub struct Channel {
     start_time: Option<Instant>,
     message_tx: broadcast::Sender<CanFrame>,
     filter: FilterSet,
+    /// Background trace. Recording is gated inside the recorder, so this can
+    /// stay attached across start/stop.
+    recorder: Option<TraceRecorder>,
 }
 
 impl Channel {
@@ -62,7 +66,13 @@ impl Channel {
             start_time: None,
             message_tx,
             filter: FilterSet::default(),
+            recorder: None,
         }
+    }
+
+    /// Attach the app-wide trace recorder. Frames are stored only while it is running.
+    pub fn attach_recorder(&mut self, recorder: TraceRecorder) {
+        self.recorder = Some(recorder);
     }
 
     /// Get a receiver for incoming messages
@@ -153,6 +163,9 @@ impl Channel {
             if let Some(start) = self.start_time {
                 sent_frame.timestamp = start.elapsed().as_secs_f64();
             }
+            if let Some(recorder) = &self.recorder {
+                recorder.record(&sent_frame);
+            }
             let _ = self.message_tx.send(sent_frame);
 
             Ok(())
@@ -196,6 +209,10 @@ impl Channel {
                 if let Some(start) = self.start_time {
                     frame.timestamp = start.elapsed().as_secs_f64();
                 }
+            }
+            // Trace the bus itself. The receive-list filter only affects the UI.
+            if let Some(recorder) = &self.recorder {
+                recorder.record(&frame);
             }
             if self.filter.matches(&frame) {
                 let _ = self.message_tx.send(frame.clone());
@@ -272,6 +289,11 @@ impl ChannelManager {
         if self.channels.contains_key(id) {
             self.active_channel = Some(id.to_string());
         }
+    }
+
+    /// Every channel, connected or not.
+    pub fn channels(&self) -> Vec<Arc<RwLock<Channel>>> {
+        self.channels.values().cloned().collect()
     }
 
     /// Get all channel IDs

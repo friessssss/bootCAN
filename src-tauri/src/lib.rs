@@ -7,6 +7,7 @@ use core::batcher::FrameBatcher;
 use core::channel::ChannelManager;
 use core::dbc::DbcDatabase;
 use core::message::CanFrame;
+use core::trace_buffer::TraceRecorder;
 use core::trace_logger::TraceLogger;
 use core::trace_player::TracePlayer;
 use parking_lot::RwLock;
@@ -32,6 +33,8 @@ pub struct AppState {
     pub periodic_jobs: Arc<RwLock<HashMap<String, PeriodicJob>>>,
     /// Trace logger for recording CAN messages
     pub trace_logger: Arc<RwLock<Option<TraceLogger>>>,
+    /// Background trace retained independently of the on-screen window
+    pub trace_recorder: TraceRecorder,
     /// Trace player for replaying log files (using tokio::RwLock for async compatibility)
     pub trace_player: Arc<TokioRwLock<TracePlayer>>,
     /// DBC databases loaded per channel (channel_id -> DBC database)
@@ -46,6 +49,7 @@ impl Default for AppState {
             channel_manager: Arc::new(RwLock::new(ChannelManager::new())),
             periodic_jobs: Arc::new(RwLock::new(HashMap::new())),
             trace_logger: Arc::new(RwLock::new(None)),
+            trace_recorder: TraceRecorder::new(),
             trace_player: Arc::new(TokioRwLock::new(TracePlayer::new())),
             dbc_databases: Arc::new(RwLock::new(HashMap::new())),
             frame_batcher: FrameBatcher::new(),
@@ -69,6 +73,24 @@ fn spawn_batch_flusher(app: tauri::AppHandle, batcher: FrameBatcher) {
             if !frames.is_empty() {
                 if let Err(e) = app.emit("can-message-batch", &frames) {
                     log::error!("Failed to emit can-message-batch: {:?}", e);
+                }
+            }
+        }
+    });
+}
+
+/// Forwards newly captured trace frames to the UI at ~30 Hz.
+fn spawn_trace_flusher(app: tauri::AppHandle, recorder: TraceRecorder) {
+    use tauri::Emitter;
+
+    tauri::async_runtime::spawn(async move {
+        let interval = std::time::Duration::from_millis(core::batcher::FLUSH_INTERVAL_MS);
+        loop {
+            tokio::time::sleep(interval).await;
+            let batch = recorder.take_ui_batch(4_000);
+            if !batch.frames.is_empty() {
+                if let Err(e) = app.emit("trace-frame-batch", &batch) {
+                    log::error!("Failed to emit trace-frame-batch: {:?}", e);
                 }
             }
         }
@@ -114,6 +136,8 @@ pub fn run() {
             spawn_hotplug_watcher(app.handle().clone());
             let batcher = app.state::<AppState>().frame_batcher.clone();
             spawn_batch_flusher(app.handle().clone(), batcher);
+            let recorder = app.state::<AppState>().trace_recorder.clone();
+            spawn_trace_flusher(app.handle().clone(), recorder);
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -128,6 +152,12 @@ pub fn run() {
             stop_periodic_transmit,
             update_periodic_transmit,
             get_periodic_tx_counts,
+            start_trace,
+            stop_trace,
+            clear_trace,
+            get_trace_status,
+            get_trace_window,
+            export_trace,
             start_logging,
             stop_logging,
             load_trace,

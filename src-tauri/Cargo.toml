@@ -1,6 +1,6 @@
 [package]
 name = "bootcan"
-version = "0.3.1"
+version = "0.3.2"
 description = "A cross-platform CAN/CAN FD network monitoring and analysis tool"
 authors = ["bootCAN Team"]
 edition = "2021"
@@ -29,6 +29,7 @@ chrono = { version = "0.4", features = ["serde"] }
 regex = "1"
 rayon = "1"
 crossbeam-channel = "0.5"
+mcap = { version = "0.19", features = ["zstd"] }
 
 # PCAN support via dlopen'd PCBUSB/PCANBasic library (Windows/macOS)
 [target.'cfg(any(target_os = "windows", target_os = "macos"))'.dependencies]

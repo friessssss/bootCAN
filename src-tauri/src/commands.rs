@@ -5,6 +5,8 @@ use crate::core::channel::{Channel, ChannelConfig, ChannelState};
 use crate::core::dbc::{DbcParser, DecodedSignal, SymParser};
 use crate::core::filter::FilterSet;
 use crate::core::message::{CanFrame, FramePayload};
+use crate::core::trace_buffer::{TraceStatus, TraceWindow, TRACE_UI_WINDOW};
+use crate::core::trace_export::{self, ExportFormat, TraceBus};
 use crate::core::trace_logger::{TraceFormat, TraceLogger, TraceLoggerConfig};
 use crate::core::trace_player::PlaybackState;
 use crate::hal::traits::{enumerate_interfaces, BusState, InterfaceInfo};
@@ -64,6 +66,15 @@ async fn connect_channel_impl(
         tokio::task::spawn_blocking(move || channel.write().connect(config))
             .await
             .map_err(|e| e.to_string())??;
+    }
+
+    // Attach before the receive pump so a trace already running keeps this net.
+    channel
+        .write()
+        .attach_recorder(state.trace_recorder.clone());
+    if state.trace_recorder.is_recording() {
+        let ts = channel.read().get_timestamp();
+        state.trace_recorder.note_channel(&channel_id, ts);
     }
 
     spawn_receive_pump(
@@ -533,6 +544,103 @@ pub async fn clear_messages(state: State<'_, AppState>) -> Result<(), String> {
     }
 
     Ok(())
+}
+
+fn channel_time_bases(state: &AppState) -> std::collections::HashMap<String, f64> {
+    let manager = state.channel_manager.read();
+    let mut bases = std::collections::HashMap::new();
+    for channel in manager.channels() {
+        let ch = channel.read();
+        if ch.state == ChannelState::Connected {
+            bases.insert(ch.id.clone(), ch.get_timestamp());
+        }
+    }
+    bases
+}
+
+fn attach_trace_recorder(state: &AppState) {
+    let recorder = state.trace_recorder.clone();
+    let manager = state.channel_manager.read();
+    for channel in manager.channels() {
+        channel.write().attach_recorder(recorder.clone());
+    }
+}
+
+/// Start a background trace. Receive/transmit stays live; frames are retained
+/// until stop, clear, or the next start.
+#[tauri::command]
+pub async fn start_trace(state: State<'_, AppState>) -> Result<TraceStatus, String> {
+    attach_trace_recorder(&state);
+    let bases = channel_time_bases(&state);
+    Ok(state.trace_recorder.start(bases))
+}
+
+/// Stop capturing. The buffer is kept so it can be viewed and exported.
+#[tauri::command]
+pub async fn stop_trace(state: State<'_, AppState>) -> Result<TraceStatus, String> {
+    Ok(state.trace_recorder.stop())
+}
+
+/// Drop the retained trace. If a trace is running, it continues from zero.
+#[tauri::command]
+pub async fn clear_trace(state: State<'_, AppState>) -> Result<TraceStatus, String> {
+    let bases = channel_time_bases(&state);
+    Ok(state.trace_recorder.clear(bases))
+}
+
+#[tauri::command]
+pub async fn get_trace_status(state: State<'_, AppState>) -> Result<TraceStatus, String> {
+    Ok(state.trace_recorder.status())
+}
+
+/// Tail of the retained trace for the on-screen window.
+#[tauri::command]
+pub async fn get_trace_window(
+    state: State<'_, AppState>,
+    limit: Option<usize>,
+) -> Result<TraceWindow, String> {
+    let limit = limit.unwrap_or(TRACE_UI_WINDOW).clamp(1, 50_000);
+    Ok(state.trace_recorder.window(limit))
+}
+
+/// Write the retained trace (or a loaded playback file) to disk.
+#[tauri::command]
+pub async fn export_trace(
+    state: State<'_, AppState>,
+    file_path: String,
+    format: String,
+    buses: Vec<TraceBus>,
+    source: String,
+) -> Result<u64, String> {
+    let format = ExportFormat::from_str(&format)
+        .ok_or_else(|| "Invalid format. Use 'trc', 'mcap', or 'csv'".to_string())?;
+
+    let (start_epoch_ns, mut frames) = if source == "playback" {
+        let player = state.trace_player.read().await;
+        trace_export::frames_from_player(&player.get_all_frames())
+    } else {
+        let (start, frames) = state.trace_recorder.snapshot();
+        (start, frames)
+    };
+
+    if frames.is_empty() {
+        return Err("No trace frames to export".to_string());
+    }
+
+    let path = PathBuf::from(file_path);
+    let databases = state.dbc_databases.read().clone();
+    tokio::task::spawn_blocking(move || {
+        trace_export::export_trace(
+            &path,
+            format,
+            start_epoch_ns,
+            &mut frames,
+            &buses,
+            &databases,
+        )
+    })
+    .await
+    .map_err(|e| format!("Export task failed: {e}"))?
 }
 
 /// Start trace logging

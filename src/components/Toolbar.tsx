@@ -1,3 +1,4 @@
+import { useState } from "react";
 import { useCanStore, useAnyConnected } from "../stores/canStore";
 import { open, save } from "@tauri-apps/plugin-dialog";
 import {
@@ -10,36 +11,37 @@ import {
   FolderOpenIcon,
 } from "./icons";
 
+type ExportFormat = "mcap" | "trc" | "csv";
+
+const EXPORT_FORMATS: { id: ExportFormat; label: string }[] = [
+  { id: "mcap", label: "MCAP" },
+  { id: "trc", label: "TRC" },
+  { id: "csv", label: "CSV" },
+];
+
 export function Toolbar() {
-  const { isPaused, togglePause, clearMessages, traceMessages, viewMode, setViewMode, isRecording, toggleRecording, saveProject, loadProject, viewTab, setViewTab } =
+  const { isPaused, togglePause, clearMessages, viewMode, setViewMode, isRecording, toggleRecording, exportTrace, traceFrameCount, playbackFrameCount, saveProject, loadProject, viewTab, setViewTab } =
     useCanStore();
   const anyConnected = useAnyConnected();
+  const [exportFormat, setExportFormat] = useState<ExportFormat>("mcap");
 
-  const handleExport = () => {
-    if (traceMessages.length === 0) return;
-
-    // Create CSV content - export format: Time, ID, DLC, Data, Direction, Channel
-    const headers = ["Time", "ID", "DLC", "Data", "Direction", "Channel"];
-    const rows = traceMessages.map((msg) => [
-      msg.timestamp.toFixed(6),
-      `0x${msg.id.toString(16).toUpperCase().padStart(msg.isExtended ? 8 : 3, "0")}`,
-      msg.dlc,
-      msg.data
-        .slice(0, msg.dlc)
-        .map((b) => b.toString(16).toUpperCase().padStart(2, "0"))
-        .join(" "),
-      msg.direction.toUpperCase(),
-      msg.channel,
-    ]);
-
-    const csv = [headers, ...rows].map((row) => row.join(",")).join("\n");
-    const blob = new Blob([csv], { type: "text/csv" });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = `can_trace_${new Date().toISOString().replace(/[:.]/g, "-")}.csv`;
-    a.click();
-    URL.revokeObjectURL(url);
+  const handleExport = async () => {
+    if (traceFrameCount === 0 && (isRecording || playbackFrameCount === 0)) return;
+    const chosen = EXPORT_FORMATS.find((format) => format.id === exportFormat) ?? EXPORT_FORMATS[0];
+    try {
+      const filePath = await save({
+        title: `Export ${chosen.label}`,
+        filters: [{ name: chosen.label, extensions: [chosen.id] }],
+        defaultPath: `can_trace_${new Date().toISOString().replace(/[:.]/g, "-")}.${chosen.id}`,
+      });
+      if (!filePath || typeof filePath !== "string") return;
+      const path = filePath.toLowerCase().endsWith(`.${chosen.id}`)
+        ? filePath
+        : `${filePath}.${chosen.id}`;
+      await exportTrace(path, chosen.id);
+    } catch (error) {
+      console.error("Failed to export trace:", error);
+    }
   };
 
   const handleSaveProject = async () => {
@@ -114,19 +116,64 @@ export function Toolbar() {
         <button
           onClick={togglePause}
           className={`btn ${isPaused ? "btn-success" : "btn-secondary"} flex items-center gap-1.5 shrink-0`}
-          title="Pause/resume the display (bus traffic continues)"
+          title="Pause the display. A background trace keeps recording."
         >
           {isPaused ? <PlayIcon className="w-4 h-4" /> : <PauseIcon className="w-4 h-4" />}
           <span className="hidden md:inline">{isPaused ? "Resume" : "Pause"}</span>
         </button>
 
         <button
-          onClick={clearMessages}
+          onClick={() => clearMessages().catch(console.error)}
           className="btn btn-secondary flex items-center gap-1.5 shrink-0"
-          title="Clear all received messages"
+          title="Clear the receive list and the retained trace"
         >
           <TrashIcon className="w-4 h-4" />
           <span className="hidden md:inline">Clear</span>
+        </button>
+
+        <button
+          onClick={() => toggleRecording().catch(console.error)}
+          className={`btn flex items-center gap-1.5 shrink-0 ${
+            isRecording ? "btn-danger" : "btn-success"
+          }`}
+          disabled={!isRecording && !anyConnected}
+          title={
+            isRecording
+              ? "Stop the background trace. Captured frames are kept."
+              : "Record bus traffic in the background. Receive and transmit stay open."
+          }
+        >
+          {isRecording ? <StopIcon className="w-4 h-4" /> : <RecordIcon className="w-4 h-4" />}
+          <span className="hidden md:inline">{isRecording ? "Stop" : "Record"}</span>
+        </button>
+
+        <select
+          value={exportFormat}
+          onChange={(e) => setExportFormat(e.target.value as ExportFormat)}
+          className="select h-8 w-[5.5rem] py-0 text-xs shrink-0"
+          title="Export format"
+          aria-label="Export format"
+        >
+          {EXPORT_FORMATS.map((format) => (
+            <option key={format.id} value={format.id}>
+              {format.label}
+            </option>
+          ))}
+        </select>
+        <button
+          onClick={() => handleExport().catch(console.error)}
+          className="btn btn-secondary flex items-center gap-1.5 shrink-0"
+          disabled={traceFrameCount === 0 && (isRecording || playbackFrameCount === 0)}
+          title={
+            exportFormat === "mcap"
+              ? "Export decoded can/Message topics, or can/0x… for unknown IDs"
+              : exportFormat === "trc"
+                ? "Export a PEAK TRC 2.1 trace"
+                : "Export a CSV trace"
+          }
+        >
+          <ArrowDownTrayIcon className="w-4 h-4" />
+          <span className="hidden lg:inline">Export</span>
         </button>
 
         {viewTab === "monitor" && (
@@ -151,31 +198,7 @@ export function Toolbar() {
               </button>
             </div>
 
-            {viewMode === "trace" && (
-              <button
-                onClick={toggleRecording}
-                className={`btn flex items-center gap-1.5 shrink-0 ${
-                  isRecording ? "btn-danger" : "btn-success"
-                }`}
-                disabled={!isRecording && !anyConnected}
-                title={isRecording ? "Stop recording" : "Record live frames into the trace"}
-              >
-                {isRecording ? <StopIcon className="w-4 h-4" /> : <RecordIcon className="w-4 h-4" />}
-                <span className="hidden md:inline">{isRecording ? "Stop" : "Record"}</span>
-              </button>
-            )}
-
             <div className="w-px h-6 bg-can-border mx-1 shrink-0" />
-
-            <button
-              onClick={handleExport}
-              className="btn btn-secondary flex items-center gap-1.5 shrink-0"
-              disabled={traceMessages.length === 0}
-              title="Export the trace buffer as CSV"
-            >
-              <ArrowDownTrayIcon className="w-4 h-4" />
-              <span className="hidden lg:inline">Export</span>
-            </button>
 
             <button
               onClick={handleSaveProject}
@@ -199,7 +222,7 @@ export function Toolbar() {
       </div>
 
       {/* Right - Version */}
-      <div className="text-xs text-can-text-muted ml-auto shrink-0 hidden xl:block">v0.3.1</div>
+      <div className="text-xs text-can-text-muted ml-auto shrink-0 hidden xl:block">v0.3.2</div>
     </header>
   );
 }

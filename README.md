@@ -2,7 +2,7 @@
 
 A modern, cross-platform CAN/CAN FD network monitoring and analysis tool built with Rust and React.
 
-**Version 0.3.1**
+**Version 0.3.2**
 
 ## Features
 
@@ -31,10 +31,10 @@ A modern, cross-platform CAN/CAN FD network monitoring and analysis tool built w
 - **Performance Optimized**: Parallel processing for fast trace file loading and signal decoding
 
 ### Trace Management
-- **Trace Logging**: Record CAN traffic to CSV or TRC format files
+- **Background Trace**: Record CAN traffic while the receive/transmit window stays open, then export PEAK TRC, MCAP, or CSV
 - **Trace Playback**: Load and replay recorded trace files with adjustable playback speed
 - **Trace Import**: Fast import of large trace files (TRC/CSV) with progress indicators
-- **CSV Export**: Export message traces to CSV format for analysis
+- **Trace Export**: Save the retained trace as PEAK `.trc` (v2.1), Lightship `CanFrameV1` MCAP, or CSV
 - **Project Save/Load**: Save and restore complete project configurations
 
 ### Interface Support
@@ -201,11 +201,11 @@ bootCAN/
 
 ### Trace Management
 
-**Logging:**
-1. Click "Start Logging" in the Trace Manager
-2. Choose file format (CSV or TRC) and location
-3. Messages are recorded to the file
-4. Click "Stop Logging" to finish
+**Recording:**
+1. Click **Record** in the toolbar. The receive/transmit window stays open and the trace keeps running if you switch to Overview or Plot.
+2. Pause only freezes the display. The trace keeps capturing.
+3. Click **Stop**. The frames stay in the buffer.
+4. Click **Export** and choose PEAK TRC, MCAP, or CSV.
 
 **Playback:**
 1. Click "Load Trace" to select a recorded trace file
@@ -215,7 +215,7 @@ bootCAN/
 
 ### Exporting Data
 
-- **Export CSV**: Click "Export CSV" in the toolbar to export current messages
+- **Export Trace**: Click "Export" to write the retained trace as PEAK TRC, MCAP (`CanFrameV1`), or CSV
 - **Save Project**: Use "Save Project" to save channel configurations and loaded DBC files
 - **Load Project**: Use "Load Project" to restore a saved project
 
@@ -285,7 +285,8 @@ For best results, build Windows releases on a Windows machine or use CI/CD.
 | DBC | Database CAN | ✅ Full support |
 | SYM | Symbol file | ✅ Full support |
 | CSV | Trace export/import | ✅ Full support |
-| TRC | Trace file | ✅ Playback + logging (known issue: logged TRC files use a different column layout than the playback parser expects — use CSV for round-tripping) |
+| TRC | PEAK PCAN-Trace 2.1 | ✅ Record, export, and playback |
+| MCAP | Decoded `can/Message` topics, `can/0x…` for unknown IDs | ✅ Export |
 
 ## License
 

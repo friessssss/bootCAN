@@ -404,8 +404,16 @@ impl TracePlayer {
         let id = u32::from_str_radix(id_str, 16)
             .map_err(|e| format!("Failed to parse ID '{}': {}", id_str, e))?;
 
-        // Determine if extended (29-bit) - IDs > 0x7FF are extended
-        let is_extended = id > 0x7FF;
+        // PEAK writes 29-bit IDs in at least 7 hex digits, so a small extended
+        // ID (for example 0x100 as "0000100") is still extended.
+        let is_extended = id_str.len() > 4 || id > 0x7FF;
+
+        // Type column (DT/FD/RR/...) is present on v2.x lines. RR is a remote frame.
+        let is_remote = if parts[2].trim().parse::<u8>().is_err() {
+            parts[2].trim().eq_ignore_ascii_case("RR")
+        } else {
+            false
+        };
 
         // Parse direction (column d)
         let direction_str = parts[direction_idx].trim();
@@ -424,15 +432,19 @@ impl TracePlayer {
             )
         })?;
 
-        // Parse data (column D) - hex bytes starting at data_start_idx
-        if parts.len() < data_start_idx + dlc as usize {
+        // Remote frames carry a requested length and no data bytes.
+        let data_len = if is_remote {
+            0
+        } else if parts.len() < data_start_idx + dlc as usize {
             return Err(format!(
                 "Not enough data bytes: need {} but only have {} parts",
                 data_start_idx + dlc as usize,
                 parts.len()
             ));
-        }
-        let data: Result<Vec<u8>, _> = parts[data_start_idx..data_start_idx + dlc as usize]
+        } else {
+            dlc as usize
+        };
+        let data: Result<Vec<u8>, _> = parts[data_start_idx..data_start_idx + data_len]
             .iter()
             .map(|b| u8::from_str_radix(b, 16))
             .collect();
@@ -441,7 +453,7 @@ impl TracePlayer {
         Ok(CanFrame {
             id,
             is_extended,
-            is_remote: false,
+            is_remote,
             dlc,
             data,
             timestamp,
@@ -489,5 +501,25 @@ mod tests {
         assert_eq!(frame.dlc, 8);
         assert_eq!(frame.direction, "rx");
         assert_eq!(frame.channel, "channel_3"); // Default channel when no mapping
+        assert!(!frame.is_extended);
+        assert!(!frame.is_remote);
+    }
+
+    #[test]
+    fn test_parse_trc_extended_and_remote() {
+        // 7 hex digits marks a 29-bit ID even when the value fits in 11 bits.
+        let extended = "      2        1.500 DT 3  0000100 Tx - 1   AA";
+        let frame = TracePlayer::parse_trc_line(extended, None, &None).unwrap();
+        assert_eq!(frame.id, 0x100);
+        assert!(frame.is_extended);
+        assert_eq!(frame.direction, "tx");
+        assert!((frame.timestamp - 0.0015).abs() < 1e-9);
+
+        let remote = "      3        2.000 RR 3       42 Rx - 2";
+        let frame = TracePlayer::parse_trc_line(remote, None, &None).unwrap();
+        assert_eq!(frame.id, 0x42);
+        assert!(frame.is_remote);
+        assert!(frame.data.is_empty());
+        assert_eq!(frame.dlc, 2);
     }
 }

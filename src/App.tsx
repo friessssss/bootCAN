@@ -43,7 +43,11 @@ function StatusBar() {
   const nets = useCanStore(useShallow((s) => s.nets));
   const busStats = useCanStore((s) => s.busStats);
   const monitorCount = useCanStore((s) => s.monitorMessages.size);
-  const traceCount = useCanStore((s) => s.traceMessages.length);
+  const traceCount = useCanStore((s) => s.traceFrameCount);
+  const visibleTrace = useCanStore((s) => s.traceMessages.length);
+  const isRecording = useCanStore((s) => s.isRecording);
+  const traceTruncated = useCanStore((s) => s.traceTruncated);
+  const traceNotice = useCanStore((s) => s.traceNotice);
   const isPaused = useCanStore((s) => s.isPaused);
 
   const busStateLabel = (state?: string) => {
@@ -99,8 +103,17 @@ function StatusBar() {
       </div>
       <div className="flex items-center gap-4 shrink-0">
         {isPaused && <span className="text-can-accent-amber">PAUSED</span>}
+        {traceNotice && (
+          <span className="text-can-text-muted truncate max-w-64" title={traceNotice}>
+            {traceNotice}
+          </span>
+        )}
         <span>IDs: {monitorCount.toLocaleString()}</span>
-        <span>Trace: {traceCount.toLocaleString()}</span>
+        <span className={isRecording ? "text-can-accent-red" : undefined}>
+          {isRecording ? "● " : ""}
+          Trace: {(traceCount > 0 ? traceCount : visibleTrace).toLocaleString()}
+          {traceTruncated ? " (full)" : ""}
+        </span>
       </div>
     </footer>
   );
