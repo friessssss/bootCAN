@@ -226,8 +226,12 @@ impl TraceRecorder {
         }
 
         let base = g.channel_base.get(&frame.channel).copied().unwrap_or(0.0);
-        let delta = (frame.timestamp - base).max(0.0);
-        let offset_ns = (delta * 1e9).round() as u64;
+        let host_elapsed = g
+            .start_instant
+            .map(|t| t.elapsed().as_secs_f64())
+            .unwrap_or(0.0);
+        let offset = frame_offset(frame.timestamp - base, host_elapsed);
+        let offset_ns = (offset * 1e9).round() as u64;
         let n = if frame.is_remote {
             0
         } else {
@@ -302,6 +306,24 @@ impl TraceRecorder {
     }
 }
 
+/// How far a net's own clock may disagree with host time before it is ignored.
+const CHANNEL_CLOCK_TOLERANCE_SECS: f64 = 2.0;
+
+/// Trace offset (seconds) for a frame whose channel clock says `channel_delta`
+/// since trace start, recorded `host_elapsed` seconds after trace start.
+///
+/// The channel clock is preferred (driver/hardware precision). If it is
+/// clearly wrong — a net whose clock stalled or restarted would otherwise put
+/// every frame at 0 — host receive time is used instead.
+fn frame_offset(channel_delta: f64, host_elapsed: f64) -> f64 {
+    let off_by = channel_delta - host_elapsed;
+    if host_elapsed > CHANNEL_CLOCK_TOLERANCE_SECS && off_by.abs() > CHANNEL_CLOCK_TOLERANCE_SECS {
+        host_elapsed
+    } else {
+        channel_delta.max(0.0)
+    }
+}
+
 pub fn system_now_ns() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -349,6 +371,19 @@ mod tests {
         assert_eq!(frames[1].offset_ns, 0);
         assert!(!rec.status().recording);
         assert_eq!(rec.status().frame_count, 2);
+    }
+
+    #[test]
+    fn frame_offset_falls_back_to_host_time_when_channel_clock_is_wrong() {
+        // Normal: channel clock wins, small receive latency is ignored.
+        assert_eq!(frame_offset(12.345, 12.350), 12.345);
+        // Frames queued before the trace started clamp to zero.
+        assert_eq!(frame_offset(-0.5, 0.01), 0.0);
+        // Stalled/restarted channel clock: frame would collapse onto 0.
+        assert_eq!(frame_offset(-40.0, 120.0), 120.0);
+        assert_eq!(frame_offset(0.0, 290.7), 290.7);
+        // Channel clock running far ahead of the host is equally implausible.
+        assert_eq!(frame_offset(500.0, 10.0), 10.0);
     }
 
     #[test]
