@@ -1,17 +1,83 @@
-# Builds the macOS app and publishes a GitHub release whenever a v* tag is
-# pushed. Tags containing a hyphen (v0.3.0-alpha) are marked as pre-releases.
+# Builds the macOS and Windows apps and publishes a GitHub release whenever a
+# v* tag is pushed, or when run manually with a tag name (the tag is then
+# created on the selected commit when the release is published). Tags
+# containing a hyphen (v0.3.0-alpha) are marked as pre-releases.
 name: Release
 
 on:
   push:
     tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to create, e.g. v0.3.3"
+        required: true
 
 permissions:
   contents: write
 
 jobs:
-  build-macos:
-    runs-on: macos-latest # Apple Silicon runner
+  # Create the release once up front so the platform builds can upload to it
+  # in parallel without racing to create it.
+  create-release:
+    runs-on: ubuntu-latest
+    outputs:
+      release_id: ${{ steps.create.outputs.result }}
+    steps:
+      - id: create
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const tag = context.eventName === 'workflow_dispatch'
+              ? '${{ inputs.tag }}'
+              : context.ref.replace('refs/tags/', '');
+            const body = [
+              'bootCAN — a PCAN Explorer-style CAN bus tool: real PCAN-USB support,',
+              'combined receive/transmit window with symbolic signal decoding, Nets,',
+              'signal-level transmit editing, filtering, tracing, and signal plotting.',
+              '',
+              '### Downloads',
+              '- **macOS (Apple Silicon):** `bootCAN_*_aarch64.dmg`',
+              '- **Windows (x64):** `bootCAN_*_x64-setup.exe` (NSIS installer) or `bootCAN_*_x64_en-US.msi`',
+              '',
+              '### PCAN-USB hardware support (optional)',
+              'Without a driver the app still runs with virtual CAN interfaces.',
+              '- **macOS:** install the MacCAN PCBUSB library from https://mac-can.github.io/drivers/libPCBUSB/',
+              '  (copy `libPCBUSB.dylib` to `/usr/local/lib/`).',
+              '- **Windows:** install the PEAK-System PCAN device driver from https://www.peak-system.com/',
+              '  (it provides `PCANBasic.dll`).',
+              '',
+              '### Unsigned builds',
+              'Builds are not code-signed yet.',
+              '- **macOS:** if the app refuses to open, clear the quarantine flag:',
+              '  `xattr -cr /Applications/bootCAN.app`',
+              '- **Windows:** SmartScreen may warn on first launch; choose **More info → Run anyway**.',
+            ].join('\n');
+            const { data } = await github.rest.repos.createRelease({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              tag_name: tag,
+              target_commitish: context.sha,
+              name: `bootCAN ${tag}`,
+              body,
+              draft: true,
+              prerelease: tag.includes('-'),
+            });
+            return data.id;
+
+  build:
+    needs: create-release
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: macos-latest # Apple Silicon runner
+            target: aarch64-apple-darwin
+            args: --target aarch64-apple-darwin
+          - platform: windows-latest
+            target: x86_64-pc-windows-msvc
+            args: ""
+    runs-on: ${{ matrix.platform }}
     steps:
       - uses: actions/checkout@v4
 
@@ -22,7 +88,7 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
         with:
-          targets: aarch64-apple-darwin
+          targets: ${{ matrix.target }}
 
       - uses: swatinem/rust-cache@v2
         with:
@@ -31,29 +97,25 @@ jobs:
       - name: Install frontend dependencies
         run: npm ci
 
-      - name: Build and publish release
+      - name: Build and upload release assets
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          tagName: ${{ github.ref_name }}
-          releaseName: "bootCAN ${{ github.ref_name }}"
-          prerelease: ${{ contains(github.ref_name, '-') }}
-          args: --target aarch64-apple-darwin
-          releaseBody: |
-            macOS (Apple Silicon) build of bootCAN — a PCAN Explorer-style CAN
-            bus tool: real PCAN-USB support via the MacCAN PCBUSB driver,
-            combined receive/transmit window with symbolic signal decoding,
-            Nets, signal-level transmit editing, filtering, tracing, and
-            signal plotting.
+          releaseId: ${{ needs.create-release.outputs.release_id }}
+          args: ${{ matrix.args }}
 
-            **PCAN-USB hardware support (optional):** install the MacCAN
-            PCBUSB library from https://mac-can.github.io/drivers/libPCBUSB/
-            (copy `libPCBUSB.dylib` to `/usr/local/lib/`). Without it the app
-            still runs with virtual CAN interfaces.
-
-            **Note:** builds are not code-signed yet. If macOS refuses to open
-            the app, clear the quarantine flag:
-            ```
-            xattr -cr /Applications/bootCAN.app
-            ```
+  # Publish the draft only once every platform uploaded successfully.
+  publish-release:
+    needs: [create-release, build]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/github-script@v7
+        with:
+          script: |
+            await github.rest.repos.updateRelease({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              release_id: Number('${{ needs.create-release.outputs.release_id }}'),
+              draft: false,
+            });
