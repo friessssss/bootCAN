@@ -98,6 +98,8 @@ fn state_from_status(status: u32) -> u8 {
 /// Unplugging the adapter produces a continuous error stream, so this trips
 /// within a few milliseconds while tolerating sporadic glitches.
 const MAX_CONSECUTIVE_READ_ERRORS: u32 = 100;
+/// Device time further than this from host time means the device clock reset.
+const CLOCK_REANCHOR_SECS: f64 = 2.0;
 
 const RX_CHANNEL_CAPACITY: usize = 65_536;
 
@@ -415,12 +417,26 @@ fn reader_loop(
             consecutive_errors = 0;
 
             let device_us = ts.total_micros();
+            let now = connect_instant.elapsed().as_secs_f64();
             let timestamp = match t0 {
                 Some((base_us, base_secs)) => {
-                    base_secs + (device_us.saturating_sub(base_us)) as f64 / 1e6
+                    let hw = base_secs + device_us.saturating_sub(base_us) as f64 / 1e6;
+                    // The device clock can restart or jump (e.g. another channel
+                    // on the adapter initialising). Without re-anchoring, every
+                    // later frame on this net would share one timestamp.
+                    if device_us < base_us || (hw - now).abs() > CLOCK_REANCHOR_SECS {
+                        log::warn!(
+                            "PCAN {} device clock jumped ({:+.3}s); re-anchoring",
+                            iface_id,
+                            hw - now
+                        );
+                        t0 = Some((device_us, now));
+                        now
+                    } else {
+                        hw
+                    }
                 }
                 None => {
-                    let now = connect_instant.elapsed().as_secs_f64();
                     t0 = Some((device_us, now));
                     now
                 }
