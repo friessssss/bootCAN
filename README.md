@@ -39,7 +39,7 @@ A modern, cross-platform CAN/CAN FD network monitoring and analysis tool built w
 
 ### Interface Support
 - **SocketCAN** (Linux): Native support for Linux SocketCAN interfaces
-- **PCAN USB** (macOS via PCBUSB, loaded at runtime): real driver integration with event-driven receive and hardware timestamps
+- **PCAN USB** (macOS via PCBUSB, Windows via PCANBasic.dll — both loaded at runtime): real driver integration with hardware timestamps (event-driven receive on macOS, polling on Windows)
 - **Virtual CAN**: Built-in virtual CAN interface for testing and development
 
 ### Statistics & Monitoring

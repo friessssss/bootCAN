@@ -103,20 +103,23 @@ impl TPCANTimestamp {
 }
 
 // --- Function types ---------------------------------------------------------
+//
+// PCANBasic.dll exports use the WINAPI (stdcall) convention; "system" maps to
+// that on Windows and to the C ABI everywhere else.
 
-type CanInitializeFn = unsafe extern "C" fn(u16, u16, u8, u32, u16) -> u32;
-type CanUninitializeFn = unsafe extern "C" fn(u16) -> u32;
-type CanResetFn = unsafe extern "C" fn(u16) -> u32;
-type CanGetStatusFn = unsafe extern "C" fn(u16) -> u32;
-type CanReadFn = unsafe extern "C" fn(u16, *mut TPCANMsg, *mut TPCANTimestamp) -> u32;
-type CanWriteFn = unsafe extern "C" fn(u16, *mut TPCANMsg) -> u32;
-type CanFilterMessagesFn = unsafe extern "C" fn(u16, u32, u32, u8) -> u32;
-type CanGetValueFn = unsafe extern "C" fn(u16, u8, *mut c_void, u32) -> u32;
-type CanSetValueFn = unsafe extern "C" fn(u16, u8, *mut c_void, u32) -> u32;
-type CanGetErrorTextFn = unsafe extern "C" fn(u32, u16, *mut c_char) -> u32;
+type CanInitializeFn = unsafe extern "system" fn(u16, u16, u8, u32, u16) -> u32;
+type CanUninitializeFn = unsafe extern "system" fn(u16) -> u32;
+type CanResetFn = unsafe extern "system" fn(u16) -> u32;
+type CanGetStatusFn = unsafe extern "system" fn(u16) -> u32;
+type CanReadFn = unsafe extern "system" fn(u16, *mut TPCANMsg, *mut TPCANTimestamp) -> u32;
+type CanWriteFn = unsafe extern "system" fn(u16, *mut TPCANMsg) -> u32;
+type CanFilterMessagesFn = unsafe extern "system" fn(u16, u32, u32, u8) -> u32;
+type CanGetValueFn = unsafe extern "system" fn(u16, u8, *mut c_void, u32) -> u32;
+type CanSetValueFn = unsafe extern "system" fn(u16, u8, *mut c_void, u32) -> u32;
+type CanGetErrorTextFn = unsafe extern "system" fn(u32, u16, *mut c_char) -> u32;
 // CAN FD entry points (present in PCBUSB >= 0.10); resolved but unused until
 // FD support lands.
-type CanInitializeFdFn = unsafe extern "C" fn(u16, *const c_char) -> u32;
+type CanInitializeFdFn = unsafe extern "system" fn(u16, *const c_char) -> u32;
 
 /// Resolved PCAN-Basic API symbols. Obtained once via [`PcbusbApi::get`].
 pub struct PcbusbApi {
@@ -155,6 +158,13 @@ fn library_candidates() -> Vec<String> {
     }
 }
 
+#[cfg(target_os = "macos")]
+const INSTALL_HINT: &str = "Install the PCBUSB library from \
+     https://mac-can.github.io/drivers/libPCBUSB/ to use PCAN-USB hardware.";
+#[cfg(target_os = "windows")]
+const INSTALL_HINT: &str = "Install the PEAK-System PCAN device driver (which \
+     includes PCANBasic.dll) from https://www.peak-system.com/ to use PCAN-USB hardware.";
+
 fn load_api() -> Result<PcbusbApi, String> {
     let mut last_err = String::new();
     for path in library_candidates() {
@@ -169,9 +179,8 @@ fn load_api() -> Result<PcbusbApi, String> {
         }
     }
     Err(format!(
-        "PCAN driver library not found ({}). Install the PCBUSB library from \
-         https://mac-can.github.io/drivers/libPCBUSB/ to use PCAN-USB hardware.",
-        last_err
+        "PCAN driver library not found ({}). {}",
+        last_err, INSTALL_HINT
     ))
 }
 

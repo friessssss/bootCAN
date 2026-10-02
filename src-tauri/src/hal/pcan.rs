@@ -189,6 +189,7 @@ impl CanInterface for PcanInterface {
 
         // Receive event fd for blocking reads (POSIX pipe on macOS/PCBUSB).
         // If unavailable we fall back to short-sleep polling in the reader.
+        #[cfg(target_os = "macos")]
         let event_fd: Option<i32> = match api.get_u32(handle, pcbusb::PCAN_RECEIVE_EVENT) {
             Ok(fd) => Some(fd as i32),
             Err(rc) => {
@@ -199,6 +200,10 @@ impl CanInterface for PcanInterface {
                 None
             }
         };
+        // On Windows PCAN_RECEIVE_EVENT is a pointer-sized Win32 HANDLE that
+        // the caller must create and set, so it is not queried; poll instead.
+        #[cfg(not(target_os = "macos"))]
+        let event_fd: Option<i32> = None;
 
         let (tx, rx) = crossbeam_channel::bounded::<CanFrame>(RX_CHANNEL_CAPACITY);
         self.rx = Some(rx);
