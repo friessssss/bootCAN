@@ -9,7 +9,8 @@ use std::time::Instant;
 
 #[cfg(target_os = "linux")]
 use socketcan::{
-    CanFrame as SocketCanFrame, CanSocket, EmbeddedFrame, ExtendedId, Frame, Socket, StandardId,
+    CanFrame as SocketCanFrame, CanSocket, EmbeddedFrame, ExtendedId, Socket, SocketOptions,
+    StandardId,
 };
 
 /// SocketCAN interface for Linux systems
@@ -194,9 +195,10 @@ impl CanInterface for SocketCanInterface {
                     .map_err(|e| format!("Failed to set filter: {}", e))?;
             }
             None => {
-                // Clear filters by setting an empty filter list
+                // Clear filters: an empty list would drop every frame, so
+                // restore the accept-all default instead.
                 socket
-                    .set_filters(&[])
+                    .set_filter_accept_all()
                     .map_err(|e| format!("Failed to clear filters: {}", e))?;
             }
         }
