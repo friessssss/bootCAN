@@ -47,10 +47,11 @@ jobs:
               '- **Windows:** install the PEAK-System PCAN device driver from https://www.peak-system.com/',
               '  (it provides `PCANBasic.dll`).',
               '',
-              '### Unsigned builds',
-              'Builds are not code-signed yet.',
-              '- **macOS:** if the app refuses to open, clear the quarantine flag:',
-              '  `xattr -cr /Applications/bootCAN.app`',
+              '### First launch',
+              'Builds are not signed with an Apple Developer ID or a Windows certificate yet.',
+              '- **macOS:** the app is ad-hoc signed. The first time, right-click bootCAN in',
+              '  Applications and choose **Open** (or **System Settings → Privacy & Security → Open Anyway**).',
+              '  If macOS still refuses, clear the quarantine flag: `xattr -cr /Applications/bootCAN.app`',
               '- **Windows:** SmartScreen may warn on first launch; choose **More info → Run anyway**.',
             ].join('\n');
             const { data } = await github.rest.repos.createRelease({
@@ -104,6 +105,15 @@ jobs:
         with:
           releaseId: ${{ needs.create-release.outputs.release_id }}
           args: ${{ matrix.args }}
+
+      # An unsigned or broken signature makes macOS report the app as
+      # "damaged". Fail before the release is published if it isn't valid.
+      - name: Verify macOS code signature
+        if: runner.os == 'macOS'
+        run: |
+          app=src-tauri/target/${{ matrix.target }}/release/bundle/macos/bootCAN.app
+          codesign --verify --deep --strict --verbose=2 "$app"
+          codesign -dv "$app" 2>&1 | grep -E 'Signature=adhoc|Authority='
 
   # Publish the draft only once every platform uploaded successfully.
   publish-release:
