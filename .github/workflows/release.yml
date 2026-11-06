@@ -114,6 +114,9 @@ jobs:
           app=src-tauri/target/${{ matrix.target }}/release/bundle/macos/bootCAN.app
           codesign --verify --deep --strict --verbose=2 "$app"
           codesign -dv "$app" 2>&1 | grep -E 'Signature=adhoc|Authority='
+          # Without this entitlement the hardened runtime blocks loading
+          # libPCBUSB.dylib and no PCAN devices are detected.
+          codesign -d --entitlements - "$app" 2>&1 | grep -q disable-library-validation
 
   # Publish the draft only once every platform uploaded successfully.
   publish-release:
