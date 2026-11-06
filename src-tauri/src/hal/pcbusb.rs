@@ -178,10 +178,14 @@ fn load_api() -> Result<PcbusbApi, String> {
             Err(e) => last_err = format!("{}: {}", path, e),
         }
     }
-    Err(format!(
+    let msg = format!(
         "PCAN driver library not found ({}). {}",
         last_err, INSTALL_HINT
-    ))
+    );
+    // Loaded once per process, so this logs once rather than on every
+    // device scan.
+    log::warn!("{}", msg);
+    Err(msg)
 }
 
 fn build_api(lib: Library) -> Result<PcbusbApi, String> {
